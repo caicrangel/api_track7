@@ -12,6 +12,7 @@ import {
   toPublicView,
 } from './credentials.js';
 import { listSyncRuns, runSync } from './sync-service.js';
+import { backfillPositions, collectPositions, getCursor, seedCursor } from './position-stream.js';
 import { TRACK7_REGIONS } from './track7-client.js';
 
 export async function integrationRoutes(app: FastifyInstance): Promise<void> {
@@ -138,6 +139,59 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const me = currentUser(request);
     const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) }).parse(request.query);
     return { runs: await listSyncRuns(me.orgId, limit) };
+  });
+
+  /** Situação do coletor contínuo de posições. */
+  app.get('/track7/stream', { preHandler: authenticate }, async (request) => {
+    const me = currentUser(request);
+    const cursor = await getCursor(me.orgId);
+    const stats = await one<{ total: number; ultimas_24h: number; ultima: Date | null; veiculos: number }>(
+      `SELECT count(*)::bigint AS total,
+              count(*) FILTER (WHERE recorded_at >= now() - interval '24 hours')::bigint AS ultimas_24h,
+              max(recorded_at) AS ultima,
+              count(DISTINCT asset_id)::int AS veiculos
+         FROM positions
+        WHERE organization_id = $1 AND recorded_at >= now() - interval '7 days'`,
+      [me.orgId],
+    );
+    return { cursor, stats };
+  });
+
+  /** Executa um ciclo do coletor sob demanda (útil para testar a conexão). */
+  app.post('/track7/stream/collect', { preHandler: requireRole('ADMIN', 'MANAGER', 'OPERATOR') }, async (request) => {
+    const me = currentUser(request);
+    return collectPositions(me.orgId);
+  });
+
+  /** Reposiciona o ponteiro do fluxo (a partir de uma data ou do presente). */
+  app.post('/track7/stream/seed', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
+    const me = currentUser(request);
+    const { from } = z.object({ from: z.coerce.date().optional() }).parse(request.body ?? {});
+    const token = await seedCursor(me.orgId, from);
+    await recordAudit({
+      organizationId: me.orgId,
+      userId: me.sub,
+      action: 'integration.track7.stream_seed',
+      metadata: { token },
+      ip: request.ip,
+    });
+    return { sinceToken: token };
+  });
+
+  /** Preenche lacunas do histórico por período (consulta from/to). */
+  app.post('/track7/stream/backfill', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
+    const me = currentUser(request);
+    const { from, to } = z
+      .object({ from: z.coerce.date(), to: z.coerce.date().default(() => new Date()) })
+      .parse(request.body ?? {});
+    await recordAudit({
+      organizationId: me.orgId,
+      userId: me.sub,
+      action: 'integration.track7.stream_backfill',
+      metadata: { from, to },
+      ip: request.ip,
+    });
+    return backfillPositions(me.orgId, from, to);
   });
 
   /** Diagnóstico ponta a ponta da integração. */

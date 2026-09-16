@@ -53,6 +53,7 @@ As URLs são editáveis na tela de integrações caso a Track7 informe um endpoi
 | Viagens por período | `POST api/trips/assets/from/{from}/to/{to}` · body `[assetIds]` |
 | Eventos por período | `POST api/events/assets/from/{from}/to/{to}` · body **`EventFilter`** |
 | Biblioteca de tipos de evento | `GET api/libraryevents/organisation/{organisationId}` |
+| **Fluxo contínuo de posições** | `GET api/positions/groups/createdsince/organisation/{organisationId}/sincetoken/{t}/quantity/{q}` |
 
 **Formato de data nos segmentos de URL:** `yyyyMMddHHmmss` em **UTC**
 (constante `DataFormats.DateTime_Format` da biblioteca oficial).
@@ -158,6 +159,45 @@ Cada execução grava um registro em `sync_runs` com status, duração, contador
 e erro — visível em **Configurações › Integrações › Histórico**.
 
 Um *lock* no Redis (`sync:{organizationId}`) impede duas sincronizações simultâneas.
+
+## 4.1. Coletor contínuo de posições (tempo real)
+
+Endpoint indicado pelo suporte da Track7 e usado como fonte do histórico de GPS:
+
+```
+GET api/positions/groups/createdsince/organisation/{organisationId}
+    /sincetoken/{sinceToken}/quantity/{quantity}
+```
+
+Funciona por **ponteiro**, não por período:
+
+| Elemento | Regra |
+|----------|-------|
+| `sinceToken` | formato `yyyyMMddHHmmssfff` (UTC, com milissegundos); `NEW` começa do instante atual |
+| Validade do token | **máximo 7 dias** — token mais antigo é recusado pela API |
+| `quantity` | até **1000** posições por entidade |
+| `HasMoreItems` (cabeçalho) | `true` enquanto houver fila; repita a chamada antes de dormir |
+| `GetSinceToken` (cabeçalho) | ponteiro a usar na próxima chamada |
+
+O ciclo implementado é o mesmo do exemplo oficial `MiX.Integrate.Samples.PositionStream`:
+drena a fila enquanto `HasMoreItems` for true e aguarda **30 segundos** até o próximo ciclo.
+
+O ponteiro é persistido em `stream_cursors` — sem isso, um reinício abriria buraco no
+histórico. Se o coletor ficar parado a ponto de o token vencer, a lacuna é registrada em
+`last_gap_from`/`last_gap_to` e preenchida pelo **backfill** por período
+(`api/positions/assets/from/{from}/to/{to}`, em janelas de 7 dias).
+
+Deduplicação é garantida pela chave primária `(organization_id, recorded_at, position_id)`:
+reprocessar a mesma janela nunca duplica ping.
+
+### Rotas de operação
+
+| Método | Rota | Função |
+|--------|------|--------|
+| GET | `/api/integrations/track7/stream` | ponteiro atual, última coleta e volume das últimas 24 h |
+| POST | `/api/integrations/track7/stream/collect` | executa um ciclo sob demanda |
+| POST | `/api/integrations/track7/stream/seed` | reposiciona o ponteiro (data ou presente) |
+| POST | `/api/integrations/track7/stream/backfill` | preenche lacunas por período |
 
 ## 5. Endpoints ainda não usados (disponíveis para o órgão gestor)
 

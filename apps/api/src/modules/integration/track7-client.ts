@@ -16,6 +16,8 @@
  *   POST api/trips/assets/from/{from}/to/{to}         → viagens por período (body: [assetIds])
  *   POST api/events/assets/from/{from}/to/{to}        → eventos por período (body: EventFilter)
  *   GET  api/libraryevents/organisation/{organisationId} → biblioteca de tipos de evento
+ *   GET  api/positions/groups/createdsince/organisation/{organisationId}/sincetoken/{t}/quantity/{q}
+ *                                                     → fluxo contínuo de posições (tempo real)
  *
  * Datas nos segmentos de URL usam o formato yyyyMMddHHmmss em UTC.
  * Posições, viagens e eventos aceitam no máximo 7 dias por chamada — use
@@ -166,6 +168,17 @@ export interface Track7EventFilter {
   MenuId: string;
 }
 
+/**
+ * Resultado das rotas `createdsince`: além dos itens, a API devolve nos
+ * cabeçalhos se ainda há dados na fila (`HasMoreItems`) e o token a usar na
+ * próxima chamada (`GetSinceToken`).
+ */
+export interface CreatedSinceResult<T> {
+  items: T[];
+  hasMoreItems: boolean;
+  nextSinceToken: string | null;
+}
+
 /** Presets de região da plataforma MiX. */
 export const TRACK7_REGIONS: Record<string, { label: string; identityUrl: string; apiUrl: string }> = {
   us: {
@@ -213,6 +226,21 @@ export function toApiDate(date: Date): string {
     `${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}`
   );
 }
+
+/**
+ * Token do fluxo incremental: yyyyMMddHHmmssfff em UTC.
+ * A API recusa tokens com mais de 7 dias; use 'NEW' para começar de agora.
+ */
+export function toSinceToken(date: Date): string {
+  const p = (n: number, len = 2) => String(n).padStart(len, '0');
+  return (
+    `${date.getUTCFullYear()}${p(date.getUTCMonth() + 1)}${p(date.getUTCDate())}` +
+    `${p(date.getUTCHours())}${p(date.getUTCMinutes())}${p(date.getUTCSeconds())}${p(date.getUTCMilliseconds(), 3)}`
+  );
+}
+
+/** Idade máxima aceita pela API para um sinceToken. */
+export const SINCE_TOKEN_MAX_AGE_MS = 7 * 86_400_000;
 
 /** "HH:MM:SS" (TimeSpan do .NET) → segundos. */
 export function timeSpanToSeconds(value: unknown): number | null {
@@ -338,11 +366,19 @@ export class Track7Client {
     }
   }
 
-  /** Executa uma chamada autenticada, com retry em erros transitórios. */
+  /** Executa uma chamada autenticada e devolve corpo e cabeçalhos. */
   private async request<T>(
     path: string,
     options: { method?: 'GET' | 'POST'; body?: unknown; retries?: number } = {},
   ): Promise<T> {
+    return (await this.requestWithHeaders<T>(path, options)).data;
+  }
+
+  /** Igual a `request`, mas preserva os cabeçalhos — usado pelo fluxo incremental. */
+  private async requestWithHeaders<T>(
+    path: string,
+    options: { method?: 'GET' | 'POST'; body?: unknown; retries?: number } = {},
+  ): Promise<{ data: T; headers: Headers }> {
     const { method = 'GET', body, retries = 2 } = options;
     let lastError: Error | null = null;
 
@@ -368,9 +404,9 @@ export class Track7Client {
       }
 
       if (response.ok) {
-        if (response.status === 204) return [] as unknown as T;
+        if (response.status === 204) return { data: [] as unknown as T, headers: response.headers };
         const text = await response.text();
-        return (text ? JSON.parse(text) : []) as T;
+        return { data: (text ? JSON.parse(text) : []) as T, headers: response.headers };
       }
 
       const detail = (await response.text()).slice(0, 500);
@@ -468,6 +504,52 @@ export class Track7Client {
       method: 'POST',
       body: filter,
     });
+  }
+
+  /**
+   * Fluxo contínuo de posições da organização — a base do coletor de tempo real.
+   *
+   * `sinceToken` é o ponteiro devolvido pela chamada anterior (ou 'NEW' para
+   * começar de agora). Enquanto `hasMoreItems` for true, chame de novo com o
+   * `nextSinceToken` antes de dormir até o próximo ciclo.
+   *
+   * Limites da API: no máximo 1000 posições por entidade e token com até 7 dias.
+   */
+  async getPositionsCreatedSinceForOrganisation(
+    organisationId: number | string,
+    sinceToken: string,
+    quantity = 1000,
+  ): Promise<CreatedSinceResult<Track7Position>> {
+    const { data, headers } = await this.requestWithHeaders<Track7Position[]>(
+      `api/positions/groups/createdsince/organisation/${organisationId}/sincetoken/${sinceToken}/quantity/${quantity}`,
+    );
+    return this.toCreatedSinceResult(data, headers);
+  }
+
+  /** Mesma coisa, restrito a um conjunto de grupos/sites. */
+  async getPositionsCreatedSinceForGroups(
+    groupIds: number[],
+    sinceToken: string,
+    quantity = 1000,
+    entityType: 'Asset' | 'Driver' = 'Asset',
+  ): Promise<CreatedSinceResult<Track7Position>> {
+    const { data, headers } = await this.requestWithHeaders<Track7Position[]>(
+      `api/positions/groups/createdsince/entitytype/${entityType}/sincetoken/${sinceToken}/quantity/${quantity}`,
+      { method: 'POST', body: groupIds },
+    );
+    return this.toCreatedSinceResult(data, headers);
+  }
+
+  private toCreatedSinceResult(
+    items: Track7Position[],
+    headers: Headers,
+  ): CreatedSinceResult<Track7Position> {
+    const hasMore = headers.get('HasMoreItems') ?? headers.get('hasmoreitems');
+    return {
+      items: items ?? [],
+      hasMoreItems: String(hasMore).toLowerCase() === 'true',
+      nextSinceToken: headers.get('GetSinceToken') ?? headers.get('getsincetoken'),
+    };
   }
 
   /** Biblioteca de tipos de evento da organização (descrições legíveis). */

@@ -6,6 +6,7 @@ import {
   Network,
   Plug,
   RefreshCw,
+  Radio,
   Save,
   ScrollText,
   Stethoscope,
@@ -214,6 +215,9 @@ interface IntegrationView {
   syncEnabled: boolean;
   syncCron: string;
   historyDays: number;
+  streamEnabled: boolean;
+  streamIntervalSeconds: number;
+  streamQuantity: number;
   lastSyncAt: string | null;
   lastSyncStatus: string | null;
   lastSyncError: string | null;
@@ -267,6 +271,8 @@ function IntegrationTab() {
     syncEnabled: true,
     syncCron: '0 */6 * * *',
     historyDays: '7',
+    streamEnabled: true,
+    streamIntervalSeconds: '30',
   });
   const [feedback, setFeedback] = useState<{ tone: 'success' | 'danger' | 'info'; message: string } | null>(null);
   const [showDiagnostics, setShowDiagnostics] = useState(false);
@@ -294,6 +300,8 @@ function IntegrationTab() {
       syncEnabled: i.syncEnabled,
       syncCron: i.syncCron,
       historyDays: String(i.historyDays),
+      streamEnabled: i.streamEnabled,
+      streamIntervalSeconds: String(i.streamIntervalSeconds),
     }));
   }, [data]);
 
@@ -309,6 +317,8 @@ function IntegrationTab() {
     syncEnabled: form.syncEnabled,
     syncCron: form.syncCron,
     historyDays: Number(form.historyDays) || 7,
+    streamEnabled: form.streamEnabled,
+    streamIntervalSeconds: Number(form.streamIntervalSeconds) || 30,
   });
 
   const save = useMutation({
@@ -540,10 +550,162 @@ function IntegrationTab() {
         </div>
       </Card>
 
+      <PositionStreamCard
+        editable={editable}
+        enabled={form.streamEnabled}
+        intervalSeconds={form.streamIntervalSeconds}
+        onChange={(patch) => setForm({ ...form, ...patch })}
+        configured={integration.configured}
+      />
+
       <DiagnosticsModal open={showDiagnostics} onClose={() => setShowDiagnostics(false)} />
       <GroupsModal open={showGroups} onClose={() => setShowGroups(false)} />
       <SyncHistoryModal open={showHistory} onClose={() => setShowHistory(false)} />
     </>
+  );
+}
+
+interface StreamStatus {
+  cursor: {
+    since_token: string | null;
+    last_run_at: string | null;
+    last_count: number;
+    total_collected: number;
+    consecutive_errors: number;
+    last_error: string | null;
+    last_gap_from: string | null;
+    last_gap_to: string | null;
+  } | null;
+  stats: { total: number; ultimas_24h: number; ultima: string | null; veiculos: number };
+}
+
+/**
+ * Coletor contínuo de posições — é ele que constrói o histórico de GPS
+ * exigido no relatório georreferenciado da SMMUR/SUMOB.
+ */
+function PositionStreamCard({
+  editable,
+  enabled,
+  intervalSeconds,
+  onChange,
+  configured,
+}: {
+  editable: boolean;
+  enabled: boolean;
+  intervalSeconds: string;
+  onChange: (patch: { streamEnabled?: boolean; streamIntervalSeconds?: string }) => void;
+  configured: boolean;
+}) {
+  const queryClient = useQueryClient();
+  const [feedback, setFeedback] = useState<string | null>(null);
+
+  const status = useQuery({
+    queryKey: ['track7-stream'],
+    queryFn: () => api<StreamStatus>('/integrations/track7/stream'),
+    refetchInterval: 15_000,
+  });
+
+  const collect = useMutation({
+    mutationFn: () =>
+      api<{ collected: number; pages: number; durationMs: number }>('/integrations/track7/stream/collect', {
+        method: 'POST',
+        body: {},
+      }),
+    onSuccess: (result) => {
+      setFeedback(`${result.collected} posição(ões) em ${result.pages} página(s) · ${result.durationMs} ms`);
+      void queryClient.invalidateQueries({ queryKey: ['track7-stream'] });
+    },
+    onError: (err: Error) => setFeedback(err.message),
+  });
+
+  const cursor = status.data?.cursor;
+  const stats = status.data?.stats;
+  const hasGap = Boolean(cursor?.last_gap_from);
+
+  return (
+    <Card className="mt-4 p-5">
+      <div className="flex flex-wrap items-center gap-3">
+        <Radio className="h-5 w-5 text-brand-600" />
+        <h2 className="text-base font-semibold text-slate-900">Coletor de posições (tempo real)</h2>
+        {cursor?.consecutive_errors ? (
+          <Badge tone="danger">{cursor.consecutive_errors} falha(s) seguida(s)</Badge>
+        ) : cursor?.since_token ? (
+          <Badge tone="success">Em operação</Badge>
+        ) : (
+          <Badge tone="neutral">Nunca executado</Badge>
+        )}
+      </div>
+      <p className="mt-2 max-w-4xl text-sm text-slate-500">
+        Lê continuamente o fluxo <code>positions/createdsince</code> da Track7 e grava cada ping no banco.
+        É este histórico que alimenta o relatório georreferenciado de viagens — sem ele não há
+        latitude e longitude para comprovar o itinerário.
+      </p>
+
+      {hasGap && (
+        <div className="mt-4">
+          <Alert tone="warning" title="Lacuna no histórico">
+            O coletor ficou parado além do limite de 7 dias do ponteiro. Use o backfill por período para
+            preencher o intervalo de {formatDateTime(cursor?.last_gap_from)} a {formatDateTime(cursor?.last_gap_to)}.
+          </Alert>
+        </div>
+      )}
+
+      {feedback && (
+        <div className="mt-4">
+          <Alert tone="info">{feedback}</Alert>
+        </div>
+      )}
+
+      <div className="mt-5 flex flex-wrap items-end gap-6">
+        <Toggle
+          checked={enabled}
+          disabled={!editable}
+          onChange={(value) => onChange({ streamEnabled: value })}
+          label="Coleta contínua ativa"
+        />
+        <Field label="Intervalo (segundos)" className="w-44" hint="30 s é o padrão da plataforma.">
+          <Input
+            type="number"
+            min={10}
+            max={3600}
+            disabled={!editable}
+            value={intervalSeconds}
+            onChange={(e) => onChange({ streamIntervalSeconds: e.target.value })}
+          />
+        </Field>
+        <Button
+          icon={<Radio className="h-4 w-4" />}
+          loading={collect.isPending}
+          disabled={!configured}
+          onClick={() => collect.mutate()}
+        >
+          Coletar agora
+        </Button>
+      </div>
+
+      <div className="mt-6 grid gap-4 border-t border-slate-100 pt-4 text-sm sm:grid-cols-4">
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Última coleta</p>
+          <p className="mt-1 text-slate-800">{formatDateTime(cursor?.last_run_at)}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Posições (24 h)</p>
+          <p className="mt-1 text-slate-800">{formatNumber(stats?.ultimas_24h)}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Veículos transmitindo</p>
+          <p className="mt-1 text-slate-800">{formatNumber(stats?.veiculos)}</p>
+        </div>
+        <div>
+          <p className="text-xs font-medium uppercase tracking-wide text-slate-400">Ponteiro do fluxo</p>
+          <p className="mt-1 break-all font-mono text-xs text-slate-600">{cursor?.since_token ?? '—'}</p>
+        </div>
+      </div>
+
+      {cursor?.last_error && (
+        <p className="mt-3 break-words text-sm text-red-600">{cursor.last_error}</p>
+      )}
+    </Card>
   );
 }
 

@@ -22,6 +22,9 @@ export interface IntegrationCredentialRow {
   sync_enabled: boolean;
   sync_cron: string;
   history_days: number;
+  stream_enabled: boolean;
+  stream_interval_seconds: number;
+  stream_quantity: number;
   last_sync_at: Date | null;
   last_sync_status: string | null;
   last_sync_error: string | null;
@@ -42,6 +45,9 @@ export const credentialsInputSchema = z.object({
   syncEnabled: z.boolean().optional(),
   syncCron: z.string().optional(),
   historyDays: z.number().int().min(1).max(90).optional(),
+  streamEnabled: z.boolean().optional(),
+  streamIntervalSeconds: z.number().int().min(10).max(3600).optional(),
+  streamQuantity: z.number().int().min(1).max(1000).optional(),
 });
 
 export type CredentialsInput = z.infer<typeof credentialsInputSchema>;
@@ -72,6 +78,9 @@ export function toPublicView(row: IntegrationCredentialRow | null) {
       syncEnabled: true,
       syncCron: '0 */6 * * *',
       historyDays: 7,
+      streamEnabled: true,
+      streamIntervalSeconds: 30,
+      streamQuantity: 1000,
       lastSyncAt: null,
       lastSyncStatus: null,
       lastSyncError: null,
@@ -92,6 +101,9 @@ export function toPublicView(row: IntegrationCredentialRow | null) {
     syncEnabled: row.sync_enabled,
     syncCron: row.sync_cron,
     historyDays: row.history_days,
+    streamEnabled: row.stream_enabled,
+    streamIntervalSeconds: row.stream_interval_seconds,
+    streamQuantity: row.stream_quantity,
     lastSyncAt: row.last_sync_at,
     lastSyncStatus: row.last_sync_status,
     lastSyncError: row.last_sync_error,
@@ -132,8 +144,9 @@ export async function saveCredentials(
     `INSERT INTO integration_credentials
        (organization_id, provider, region, identity_url, api_url, scope,
         client_id_enc, client_secret_enc, username_enc, password_enc,
-        organisation_id, group_ids, sync_enabled, sync_cron, history_days, updated_at)
-     VALUES ($1,'track7',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14, now())
+        organisation_id, group_ids, sync_enabled, sync_cron, history_days,
+        stream_enabled, stream_interval_seconds, stream_quantity, updated_at)
+     VALUES ($1,'track7',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17, now())
      ON CONFLICT (organization_id, provider) DO UPDATE SET
         region = EXCLUDED.region,
         identity_url = EXCLUDED.identity_url,
@@ -148,6 +161,9 @@ export async function saveCredentials(
         sync_enabled = EXCLUDED.sync_enabled,
         sync_cron = EXCLUDED.sync_cron,
         history_days = EXCLUDED.history_days,
+        stream_enabled = EXCLUDED.stream_enabled,
+        stream_interval_seconds = EXCLUDED.stream_interval_seconds,
+        stream_quantity = EXCLUDED.stream_quantity,
         updated_at = now()
      RETURNING *`,
     [
@@ -165,6 +181,9 @@ export async function saveCredentials(
       input.syncEnabled ?? current?.sync_enabled ?? true,
       input.syncCron ?? current?.sync_cron ?? '0 */6 * * *',
       input.historyDays ?? current?.history_days ?? 7,
+      input.streamEnabled ?? current?.stream_enabled ?? true,
+      input.streamIntervalSeconds ?? current?.stream_interval_seconds ?? 30,
+      input.streamQuantity ?? current?.stream_quantity ?? 1000,
     ],
   );
   return row!;

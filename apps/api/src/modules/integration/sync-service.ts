@@ -436,7 +436,7 @@ async function upsertDrivers(organizationId: string, drivers: Track7Driver[]): P
   );
 }
 
-async function upsertPositions(
+export async function upsertPositions(
   organizationId: string,
   positions: Track7Position[],
   updateLast: boolean,
