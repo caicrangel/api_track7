@@ -12,6 +12,7 @@ import {
   YAxis,
 } from 'recharts';
 import { api } from '../lib/api';
+import { useOperator } from '../lib/operator';
 import { formatDateTime, formatNumber, timeAgo } from '../lib/format';
 import { Alert, Card, EmptyState, PageHeader, Spinner, StatCard } from '../components/ui';
 
@@ -24,9 +25,10 @@ interface DashboardData {
 }
 
 export function DashboardPage() {
+  const { operatorId, operator } = useOperator();
   const { data, isLoading, error } = useQuery({
-    queryKey: ['dashboard'],
-    queryFn: () => api<DashboardData>('/dashboard'),
+    queryKey: ['dashboard', operatorId],
+    queryFn: () => api<DashboardData>('/dashboard', { query: { operatorId: operatorId ?? undefined } }),
     refetchInterval: 60_000,
   });
 
@@ -41,7 +43,11 @@ export function DashboardPage() {
       <PageHeader
         icon={<LayoutDashboard className="h-6 w-6" />}
         title="Dashboard"
-        subtitle="Visão geral da frota integrada à telemetria Track7."
+        subtitle={
+          operator
+            ? `Visão geral de ${operator.shortName ?? operator.name}.`
+            : 'Visão consolidada de todas as empresas operadoras.'
+        }
       />
 
       {semDados && (

@@ -18,6 +18,8 @@ export type SyncKind = 'catalog' | 'incremental' | 'history';
 
 export interface SyncOptions {
   organizationId: string;
+  /** Empresa operadora dona das credenciais e dos dados. */
+  operatorId: string;
   kind?: SyncKind;
   triggerSource?: 'manual' | 'schedule' | 'boot' | 'api';
   userId?: string | null;
@@ -68,11 +70,11 @@ function flattenGroups(
 }
 
 export async function runSync(options: SyncOptions): Promise<SyncResult> {
-  const { organizationId, kind = 'incremental', triggerSource = 'manual', userId = null } = options;
+  const { organizationId, operatorId, kind = 'incremental', triggerSource = 'manual', userId = null } = options;
 
-  const release = await acquireLock(`sync:${organizationId}`, 1800);
+  const release = await acquireLock(`sync:${operatorId}`, 1800);
   if (!release) {
-    throw badRequest('Já existe uma sincronização em andamento para esta organização.');
+    throw badRequest('Já existe uma sincronização em andamento para esta empresa operadora.');
   }
 
   const startedAt = Date.now();
@@ -80,9 +82,9 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   const stats: Record<string, number> = {};
 
   const run = await one<{ id: string }>(
-    `INSERT INTO sync_runs (organization_id, provider, kind, status, trigger_source, created_by)
-     VALUES ($1,'track7',$2,'RUNNING',$3,$4) RETURNING id`,
-    [organizationId, kind, triggerSource, userId],
+    `INSERT INTO sync_runs (organization_id, operator_id, provider, kind, status, trigger_source, created_by)
+     VALUES ($1,$2,'track7',$3,'RUNNING',$4,$5) RETURNING id`,
+    [organizationId, operatorId, kind, triggerSource, userId],
   );
   const runId = run!.id;
 
@@ -115,7 +117,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   let fatalError: string | undefined;
 
   try {
-    const { row, client } = await buildClient(organizationId);
+    const { row, client } = await buildClient(operatorId);
 
     // 1) Organizações visíveis / grupo raiz
     const organisationId = await track('organizacao', async () => {
@@ -127,11 +129,11 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       if (!configured) {
         await query(
           `UPDATE integration_credentials SET organisation_id = $2, updated_at = now()
-            WHERE organization_id = $1 AND provider = 'track7'`,
-          [organizationId, resolved.GroupId],
+            WHERE operator_id = $1 AND provider = 'track7'`,
+          [operatorId, resolved.GroupId],
         );
       }
-      await upsertGroups(organizationId, orgs.map((o) => ({ node: o, parentId: null, level: 0 })), true);
+      await upsertGroups(organizationId, operatorId, orgs.map((o) => ({ node: o, parentId: null, level: 0 })), true);
       return Number(resolved.GroupId);
     }, false);
 
@@ -141,7 +143,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     await track('grupos', async () => {
       const tree = await client.getSubGroups(organisationId);
       const flat = flattenGroups(tree, null, 0);
-      await upsertGroups(organizationId, flat, false);
+      await upsertGroups(organizationId, operatorId, flat, false);
       return flat.length;
     });
 
@@ -156,7 +158,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         for (const asset of assets) seen.set(Number(asset.AssetId), { ...asset, __groupId: groupId });
       }
       const list = [...seen.values()];
-      await upsertVehicles(organizationId, list);
+      await upsertVehicles(organizationId, operatorId, list);
       stats.veiculos = list.length;
       return list.map((a) => Number(a.AssetId));
     });
@@ -164,21 +166,21 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     // 4) Motoristas
     await track('motoristas', async () => {
       const drivers = await client.getDrivers(organisationId);
-      await upsertDrivers(organizationId, drivers);
+      await upsertDrivers(organizationId, operatorId, drivers);
       return drivers.length;
     });
 
     // 5) Últimas posições
     await track('posicoes_atuais', async () => {
       const positions = await client.getLatestPositionsByGroups(targetGroups, 1);
-      await upsertPositions(organizationId, positions, true);
+      await upsertPositions(organizationId, operatorId, positions, true);
       return positions.length;
     });
 
     // 6) Biblioteca de tipos de evento (dá nome legível aos eventos)
     const eventTypes = await track('tipos_evento', async () => {
       const library = await client.getLibraryEvents(organisationId);
-      await upsertEventTypes(organizationId, library);
+      await upsertEventTypes(organizationId, operatorId, library);
       return library;
     });
     const eventTypeNames = new Map<number, string>();
@@ -202,18 +204,18 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
               ),
             ));
 
-      await track('viagens', () => syncTrips(organizationId, client, assetIds, from, to));
-      await track('eventos', () => syncEvents(organizationId, client, assetIds, from, to, eventTypeNames));
+      await track('viagens', () => syncTrips(organizationId, operatorId, client, assetIds, from, to));
+      await track('eventos', () => syncEvents(organizationId, operatorId, client, assetIds, from, to, eventTypeNames));
     } else {
       steps.push({ step: 'viagens', status: 'skipped', durationMs: 0 });
       steps.push({ step: 'eventos', status: 'skipped', durationMs: 0 });
     }
 
-    await markSyncResult(organizationId, 'SUCCESS', null);
+    await markSyncResult(operatorId, 'SUCCESS', null);
   } catch (err) {
     status = steps.some((s) => s.status === 'ok') ? 'PARTIAL' : 'ERROR';
     fatalError = (err as Error).message;
-    await markSyncResult(organizationId, status, fatalError).catch(() => {});
+    await markSyncResult(operatorId, status, fatalError).catch(() => {});
   } finally {
     await release();
   }
@@ -226,6 +228,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     [runId, status, durationMs, JSON.stringify(stats), JSON.stringify(steps), fatalError ?? null],
   );
   await cacheDelPrefix(`org:${organizationId}:`);
+  await cacheDelPrefix(`op:${operatorId}:`);
 
   return { runId, status, stats, steps, error: fatalError, durationMs };
 }
@@ -234,12 +237,14 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
 async function upsertGroups(
   organizationId: string,
+  operatorId: string,
   entries: Array<{ node: Track7Group; parentId: number | null; level: number }>,
   isOrganisation: boolean,
 ): Promise<number> {
   if (!entries.length) return 0;
   const values = entries.map(({ node, parentId, level }) => [
     organizationId,
+    operatorId,
     Number(node.GroupId),
     parentId,
     node.Name ?? `Grupo ${node.GroupId}`,
@@ -257,6 +262,7 @@ async function upsertGroups(
       't7_groups',
       [
         'organization_id',
+        'operator_id',
         'group_id',
         'parent_group_id',
         'name',
@@ -268,16 +274,21 @@ async function upsertGroups(
         'raw',
       ],
       values,
-      ['organization_id', 'group_id'],
+      ['operator_id', 'group_id'],
       ['parent_group_id', 'name', 'group_type', 'group_type_name', 'time_zone', 'level', 'raw'],
     ),
   );
 }
 
-async function upsertVehicles(organizationId: string, assets: Track7Asset[]): Promise<number> {
+async function upsertVehicles(
+  organizationId: string,
+  operatorId: string,
+  assets: Track7Asset[],
+): Promise<number> {
   if (!assets.length) return 0;
   const values = assets.map((a) => [
     organizationId,
+    operatorId,
     Number(a.AssetId),
     num(a.SiteId),
     num((a as Record<string, unknown>).__groupId),
@@ -314,6 +325,7 @@ async function upsertVehicles(organizationId: string, assets: Track7Asset[]): Pr
       'vehicles',
       [
         'organization_id',
+        'operator_id',
         'asset_id',
         'site_id',
         'group_id',
@@ -344,7 +356,7 @@ async function upsertVehicles(organizationId: string, assets: Track7Asset[]): Pr
         'raw',
       ],
       values,
-      ['organization_id', 'asset_id'],
+      ['operator_id', 'asset_id'],
       [
         'site_id',
         'group_id',
@@ -379,17 +391,22 @@ async function upsertVehicles(organizationId: string, assets: Track7Asset[]): Pr
     await client.query(
       `UPDATE vehicles SET status = CASE WHEN asset_id = ANY($2::bigint[]) THEN 'ACTIVE' ELSE 'INACTIVE' END,
               synced_at = now()
-        WHERE organization_id = $1`,
-      [organizationId, assets.map((a) => Number(a.AssetId))],
+        WHERE operator_id = $1`,
+      [operatorId, assets.map((a) => Number(a.AssetId))],
     );
     return affected;
   });
 }
 
-async function upsertDrivers(organizationId: string, drivers: Track7Driver[]): Promise<number> {
+async function upsertDrivers(
+  organizationId: string,
+  operatorId: string,
+  drivers: Track7Driver[],
+): Promise<number> {
   if (!drivers.length) return 0;
   const values = drivers.map((d) => [
     organizationId,
+    operatorId,
     Number(d.DriverId),
     num(d.SiteId),
     d.Name ?? null,
@@ -408,6 +425,7 @@ async function upsertDrivers(organizationId: string, drivers: Track7Driver[]): P
       'drivers',
       [
         'organization_id',
+        'operator_id',
         'driver_id',
         'site_id',
         'name',
@@ -420,7 +438,7 @@ async function upsertDrivers(organizationId: string, drivers: Track7Driver[]): P
         'raw',
       ],
       values,
-      ['organization_id', 'driver_id'],
+      ['operator_id', 'driver_id'],
       [
         'site_id',
         'name',
@@ -438,6 +456,7 @@ async function upsertDrivers(organizationId: string, drivers: Track7Driver[]): P
 
 export async function upsertPositions(
   organizationId: string,
+  operatorId: string,
   positions: Track7Position[],
   updateLast: boolean,
 ): Promise<number> {
@@ -446,6 +465,7 @@ export async function upsertPositions(
 
   const values = valid.map((p) => [
     organizationId,
+    operatorId,
     Number(p.PositionId),
     Number(p.AssetId),
     num(p.DriverId),
@@ -467,6 +487,7 @@ export async function upsertPositions(
       'positions',
       [
         'organization_id',
+        'operator_id',
         'position_id',
         'asset_id',
         'driver_id',
@@ -482,7 +503,7 @@ export async function upsertPositions(
         'source',
       ],
       values,
-      ['organization_id', 'recorded_at', 'position_id'],
+      ['operator_id', 'recorded_at', 'position_id'],
       [],
     );
 
@@ -497,6 +518,7 @@ export async function upsertPositions(
       }
       const lastValues = [...latest.values()].map((p) => [
         organizationId,
+        operatorId,
         Number(p.AssetId),
         Number(p.PositionId),
         num(p.DriverId),
@@ -513,6 +535,7 @@ export async function upsertPositions(
         'vehicle_last_position',
         [
           'organization_id',
+          'operator_id',
           'asset_id',
           'position_id',
           'driver_id',
@@ -525,7 +548,7 @@ export async function upsertPositions(
           'formatted_address',
         ],
         lastValues,
-        ['organization_id', 'asset_id'],
+        ['operator_id', 'asset_id'],
         [
           'position_id',
           'driver_id',
@@ -545,6 +568,7 @@ export async function upsertPositions(
 
 async function syncTrips(
   organizationId: string,
+  operatorId: string,
   client: Track7Client,
   assetIds: number[],
   from: Date,
@@ -555,18 +579,23 @@ async function syncTrips(
   for (const [windowStart, windowEnd] of splitWindows(from, to)) {
     for (const batch of chunk(assetIds, 50)) {
       const trips = await client.getTripsByAssets(batch, windowStart, windowEnd);
-      total += await upsertTrips(organizationId, trips);
+      total += await upsertTrips(organizationId, operatorId, trips);
     }
   }
   return total;
 }
 
-async function upsertTrips(organizationId: string, trips: Track7Trip[]): Promise<number> {
+async function upsertTrips(
+  organizationId: string,
+  operatorId: string,
+  trips: Track7Trip[],
+): Promise<number> {
   const valid = trips.filter((t) => parseDate(t.TripStart));
   if (!valid.length) return 0;
 
   const values = valid.map((t) => [
     organizationId,
+    operatorId,
     Number(t.TripId),
     Number(t.AssetId),
     num(t.DriverId),
@@ -597,6 +626,7 @@ async function upsertTrips(organizationId: string, trips: Track7Trip[]): Promise
 
   const columns = [
     'organization_id',
+    'operator_id',
     'trip_id',
     'asset_id',
     'driver_id',
@@ -626,12 +656,13 @@ async function upsertTrips(organizationId: string, trips: Track7Trip[]): Promise
   ];
 
   return transaction((client) =>
-    bulkUpsert(client, 'trips', columns, values, ['organization_id', 'trip_id'], columns.slice(2)),
+    bulkUpsert(client, 'trips', columns, values, ['operator_id', 'trip_id'], columns.slice(3)),
   );
 }
 
 async function syncEvents(
   organizationId: string,
+  operatorId: string,
   client: Track7Client,
   assetIds: number[],
   from: Date,
@@ -643,7 +674,7 @@ async function syncEvents(
   for (const [windowStart, windowEnd] of splitWindows(from, to)) {
     for (const batch of chunk(assetIds, 50)) {
       const events = await client.getEventsByAssets(batch, windowStart, windowEnd);
-      total += await upsertEvents(organizationId, events, eventTypeNames);
+      total += await upsertEvents(organizationId, operatorId, events, eventTypeNames);
     }
   }
   return total;
@@ -651,11 +682,13 @@ async function syncEvents(
 
 async function upsertEventTypes(
   organizationId: string,
+  operatorId: string,
   library: Track7LibraryEvent[],
 ): Promise<number> {
   if (!library.length) return 0;
   const values = library.map((item) => [
     organizationId,
+    operatorId,
     Number(item.EventTypeId),
     item.Description ?? null,
     item.EventType ?? null,
@@ -666,6 +699,7 @@ async function upsertEventTypes(
   ]);
   const columns = [
     'organization_id',
+    'operator_id',
     'event_type_id',
     'description',
     'event_type',
@@ -675,12 +709,13 @@ async function upsertEventTypes(
     'raw',
   ];
   return transaction((client) =>
-    bulkUpsert(client, 't7_event_types', columns, values, ['organization_id', 'event_type_id'], columns.slice(2)),
+    bulkUpsert(client, 't7_event_types', columns, values, ['operator_id', 'event_type_id'], columns.slice(3)),
   );
 }
 
 async function upsertEvents(
   organizationId: string,
+  operatorId: string,
   events: Track7Event[],
   eventTypeNames: Map<number, string> = new Map(),
 ): Promise<number> {
@@ -689,6 +724,7 @@ async function upsertEvents(
 
   const values = valid.map((e) => [
     organizationId,
+    operatorId,
     Number(e.EventId),
     Number(e.AssetId),
     num(e.DriverId),
@@ -713,6 +749,7 @@ async function upsertEvents(
 
   const columns = [
     'organization_id',
+    'operator_id',
     'event_id',
     'asset_id',
     'driver_id',
@@ -735,20 +772,23 @@ async function upsertEvents(
   ];
 
   return transaction((client) =>
-    bulkUpsert(client, 'telemetry_events', columns, values, ['organization_id', 'event_id'], columns.slice(2)),
+    bulkUpsert(client, 'telemetry_events', columns, values, ['operator_id', 'event_id'], columns.slice(3)),
   );
 }
 
-export async function listSyncRuns(organizationId: string, limit = 20) {
+export async function listSyncRuns(organizationId: string, limit = 20, operatorId?: string | null) {
   const result = await pool.query(
     `SELECT r.id, r.kind, r.status, r.trigger_source, r.started_at, r.finished_at,
-            r.duration_ms, r.stats, r.steps, r.error, u.name AS created_by_name
+            r.duration_ms, r.stats, r.steps, r.error,
+            u.name AS created_by_name, op.name AS operator_name
        FROM sync_runs r
        LEFT JOIN users u ON u.id = r.created_by
+       LEFT JOIN operators op ON op.id = r.operator_id
       WHERE r.organization_id = $1
+        AND ($3::uuid IS NULL OR r.operator_id = $3::uuid)
       ORDER BY r.started_at DESC
       LIMIT $2`,
-    [organizationId, limit],
+    [organizationId, limit, operatorId ?? null],
   );
   return result.rows;
 }

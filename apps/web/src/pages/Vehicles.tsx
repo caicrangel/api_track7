@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api, downloadFile } from '../lib/api';
+import { useOperator } from '../lib/operator';
 import { formatDateTime, formatDuration, formatNumber, timeAgo } from '../lib/format';
 import {
   Alert,
@@ -54,6 +55,8 @@ interface Vehicle {
   formatted_address: string | null;
   connectivity: 'MOVENDO' | 'PARADO' | 'SEM_COMUNICACAO';
   synced_at: string | null;
+  operator_id?: string;
+  operator_name?: string | null;
 }
 
 interface VehicleListResponse {
@@ -90,6 +93,7 @@ const CONNECTIVITY_LABELS: Record<Vehicle['connectivity'], { label: string; tone
 };
 
 export function VehiclesPage() {
+  const { operatorId, operator } = useOperator();
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [connectivity, setConnectivity] = useState('');
@@ -108,20 +112,34 @@ export function VehiclesPage() {
     return () => clearTimeout(timer);
   }, [search]);
 
-  const query = { search: debounced, connectivity, siteId, make, page, pageSize: 25 };
+  const query = {
+    search: debounced,
+    connectivity,
+    siteId,
+    make,
+    page,
+    pageSize: 25,
+    operatorId: operatorId ?? undefined,
+  };
 
   const vehicles = useQuery({
     queryKey: ['vehicles', query],
     queryFn: () => api<VehicleListResponse>('/vehicles', { query }),
   });
-  const summary = useQuery({ queryKey: ['vehicles-summary'], queryFn: () => api<SummaryResponse>('/vehicles/summary') });
-  const filters = useQuery({ queryKey: ['vehicles-filters'], queryFn: () => api<FiltersResponse>('/vehicles/filters') });
+  const summary = useQuery({
+    queryKey: ['vehicles-summary', operatorId],
+    queryFn: () => api<SummaryResponse>('/vehicles/summary', { query: { operatorId: operatorId ?? undefined } }),
+  });
+  const filters = useQuery({
+    queryKey: ['vehicles-filters', operatorId],
+    queryFn: () => api<FiltersResponse>('/vehicles/filters', { query: { operatorId: operatorId ?? undefined } }),
+  });
 
   const handleExport = async () => {
     setExporting(true);
     try {
       await downloadFile('/vehicles/export', `veiculos-${new Date().toISOString().slice(0, 10)}.csv`, {
-        query: { search: debounced, connectivity, siteId, make },
+        query: { search: debounced, connectivity, siteId, make, operatorId: operatorId ?? undefined },
       });
     } finally {
       setExporting(false);
@@ -135,7 +153,11 @@ export function VehiclesPage() {
       <PageHeader
         icon={<Truck className="h-6 w-6" />}
         title="Veículos"
-        subtitle="Frota sincronizada da API oficial da Track7."
+        subtitle={
+          operator
+            ? `Frota de ${operator.shortName ?? operator.name}, sincronizada da API oficial da Track7.`
+            : 'Frota consolidada de todas as empresas operadoras.'
+        }
         actions={
           <>
             <Button icon={<RefreshCw className="h-4 w-4" />} onClick={() => { void vehicles.refetch(); void summary.refetch(); }}>
@@ -234,6 +256,7 @@ export function VehiclesPage() {
               <thead className="bg-slate-50">
                 <tr>
                   <Th>Veículo</Th>
+                  {!operatorId && <Th>Empresa</Th>}
                   <Th>Placa</Th>
                   <Th>Grupo / Site</Th>
                   <Th className="hidden 2xl:table-cell">Marca / Modelo</Th>
@@ -264,6 +287,7 @@ export function VehiclesPage() {
                           </div>
                         </div>
                       </Td>
+                      {!operatorId && <Td className="max-w-[180px] truncate">{vehicle.operator_name ?? '—'}</Td>}
                       <Td className="font-mono text-xs uppercase">{vehicle.registration_number ?? '—'}</Td>
                       <Td className="max-w-[220px] truncate">{vehicle.site_name ?? '—'}</Td>
                       <Td className="hidden 2xl:table-cell">

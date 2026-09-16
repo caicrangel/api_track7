@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { BrowserRouter, Navigate, Route, Routes } from 'react-router-dom';
 import { AuthProvider, useAuth } from './lib/auth';
+import { OperatorProvider } from './lib/operator';
 import { Layout } from './components/Layout';
 import { Spinner } from './components/ui';
 import { LoginPage } from './pages/Login';
@@ -13,6 +14,7 @@ import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { UsersPage } from './pages/Users';
 import { HelpPage } from './pages/Help';
+import { OperatorsPage } from './pages/Operators';
 import { ProfilePage } from './pages/Profile';
 import './index.css';
 
@@ -30,7 +32,11 @@ function ProtectedRoutes() {
   const { user, loading } = useAuth();
   if (loading) return <Spinner label="Carregando sessão..." />;
   if (!user) return <Navigate to="/login" replace />;
-  return <Layout />;
+  return (
+    <OperatorProvider>
+      <Layout />
+    </OperatorProvider>
+  );
 }
 
 function PublicOnly({ children }: { children: JSX.Element }) {
@@ -60,6 +66,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="motoristas" element={<DriversPage />} />
               <Route path="relatorios" element={<ReportsPage />} />
               <Route path="configuracoes" element={<SettingsPage />} />
+              <Route path="operadoras" element={<OperatorsPage />} />
               <Route path="usuarios" element={<UsersPage />} />
               <Route path="ajuda" element={<HelpPage />} />
               <Route path="perfil" element={<ProfilePage />} />

@@ -11,6 +11,7 @@ import { closeRedis } from './lib/cache.js';
 import { AppError } from './lib/errors.js';
 import { authRoutes } from './modules/auth/auth-routes.js';
 import { usersRoutes } from './modules/users/users-routes.js';
+import { operatorsRoutes } from './modules/operators/operators-routes.js';
 import { settingsRoutes } from './modules/settings/settings-routes.js';
 import { integrationRoutes } from './modules/integration/integration-routes.js';
 import { vehiclesRoutes } from './modules/vehicles/vehicles-routes.js';
@@ -77,6 +78,7 @@ export async function buildServer() {
 
   await app.register(authRoutes, { prefix: '/api/auth' });
   await app.register(usersRoutes, { prefix: '/api/users' });
+  await app.register(operatorsRoutes, { prefix: '/api/operators' });
   await app.register(settingsRoutes, { prefix: '/api/settings' });
   await app.register(integrationRoutes, { prefix: '/api/integrations' });
   await app.register(vehiclesRoutes, { prefix: '/api/vehicles' });

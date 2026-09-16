@@ -2,6 +2,7 @@ import { useQuery } from '@tanstack/react-query';
 import { Search, UsersRound } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
+import { useOperator } from '../lib/operator';
 import { formatDateTime } from '../lib/format';
 import {
   Alert,
@@ -25,9 +26,11 @@ interface Driver {
   email: string | null;
   site_name: string | null;
   synced_at: string | null;
+  operator_name?: string | null;
 }
 
 export function DriversPage() {
+  const { operatorId } = useOperator();
   const [search, setSearch] = useState('');
   const [debounced, setDebounced] = useState('');
   const [page, setPage] = useState(1);
@@ -41,10 +44,10 @@ export function DriversPage() {
   }, [search]);
 
   const { data, isLoading, error } = useQuery({
-    queryKey: ['drivers', debounced, page],
+    queryKey: ['drivers', debounced, page, operatorId],
     queryFn: () =>
       api<{ data: Driver[]; page: number; pageSize: number; total: number }>('/drivers', {
-        query: { search: debounced, page, pageSize: 25 },
+        query: { search: debounced, page, pageSize: 25, operatorId: operatorId ?? undefined },
       }),
   });
 
@@ -89,6 +92,7 @@ export function DriversPage() {
               <thead className="bg-slate-50">
                 <tr>
                   <Th>Nome</Th>
+                  {!operatorId && <Th>Empresa</Th>}
                   <Th>Matrícula</Th>
                   <Th>Grupo / Site</Th>
                   <Th>Telefone</Th>
@@ -100,6 +104,7 @@ export function DriversPage() {
                 {data.data.map((driver) => (
                   <tr key={driver.driver_id} className="hover:bg-slate-50/70">
                     <Td className="font-medium text-slate-800">{driver.name ?? `Motorista ${driver.driver_id}`}</Td>
+                    {!operatorId && <Td>{driver.operator_name ?? '—'}</Td>}
                     <Td>{driver.employee_number ?? '—'}</Td>
                     <Td>{driver.site_name ?? '—'}</Td>
                     <Td>{driver.mobile_number ?? '—'}</Td>

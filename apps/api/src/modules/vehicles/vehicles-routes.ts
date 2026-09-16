@@ -16,6 +16,8 @@ const SORTABLE: Record<string, string> = {
 };
 
 const listSchema = z.object({
+  /** Vazio = visão consolidada de todas as operadoras da conta. */
+  operatorId: z.string().uuid().optional(),
   search: z.string().trim().optional(),
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
   siteId: z.coerce.number().optional(),
@@ -34,8 +36,12 @@ type ListQuery = z.infer<typeof listSchema>;
 function buildWhere(orgId: string, q: ListQuery) {
   // $2 é sempre a janela de "sem comunicação"; o predicado no-op abaixo garante
   // que ele seja referenciado mesmo nas consultas que não usam CONNECTIVITY_SQL.
-  const params: unknown[] = [orgId, q.offlineHours];
-  const where = ['v.organization_id = $1', '($2::text IS NOT NULL)'];
+  const params: unknown[] = [orgId, q.offlineHours, q.operatorId ?? null];
+  const where = [
+    'v.organization_id = $1',
+    '($2::text IS NOT NULL)',
+    '($3::uuid IS NULL OR v.operator_id = $3::uuid)',
+  ];
 
   if (q.search) {
     params.push(`%${q.search}%`);
@@ -89,6 +95,8 @@ const BASE_SELECT = `
          v.status,
          v.odometer_km,
          v.engine_hours_seconds,
+         v.operator_id,
+         op.name       AS operator_name,
          v.site_id,
          g.name        AS site_name,
          v.default_driver_id,
@@ -105,11 +113,13 @@ const BASE_SELECT = `
          ${CONNECTIVITY_SQL} AS connectivity
     FROM vehicles v
     LEFT JOIN vehicle_last_position p
-           ON p.organization_id = v.organization_id AND p.asset_id = v.asset_id
+           ON p.operator_id = v.operator_id AND p.asset_id = v.asset_id
     LEFT JOIN t7_groups g
-           ON g.organization_id = v.organization_id AND g.group_id = v.site_id
+           ON g.operator_id = v.operator_id AND g.group_id = v.site_id
     LEFT JOIN drivers d
-           ON d.organization_id = v.organization_id AND d.driver_id = v.default_driver_id`;
+           ON d.operator_id = v.operator_id AND d.driver_id = v.default_driver_id
+    LEFT JOIN operators op
+           ON op.id = v.operator_id`;
 
 export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
   /** Listagem paginada com filtros. */
@@ -122,7 +132,7 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
       `SELECT count(*)::int AS count
          FROM vehicles v
          LEFT JOIN vehicle_last_position p
-                ON p.organization_id = v.organization_id AND p.asset_id = v.asset_id
+                ON p.operator_id = v.operator_id AND p.asset_id = v.asset_id
         WHERE ${where}`,
       params,
     );
@@ -144,8 +154,11 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
   /** Indicadores da frota para os cards do módulo. */
   app.get('/summary', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
-    const { offlineHours } = z
-      .object({ offlineHours: z.coerce.number().int().min(1).max(720).default(24) })
+    const { offlineHours, operatorId } = z
+      .object({
+        offlineHours: z.coerce.number().int().min(1).max(720).default(24),
+        operatorId: z.string().uuid().optional(),
+      })
       .parse(request.query);
 
     const summary = await one(
@@ -163,25 +176,26 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
          max(p.recorded_at)                                               AS ultima_transmissao
        FROM vehicles v
        LEFT JOIN vehicle_last_position p
-              ON p.organization_id = v.organization_id AND p.asset_id = v.asset_id
-      WHERE v.organization_id = $1`,
-      [me.orgId, offlineHours],
+              ON p.operator_id = v.operator_id AND p.asset_id = v.asset_id
+      WHERE v.organization_id = $1 AND ($3::uuid IS NULL OR v.operator_id = $3::uuid)`,
+      [me.orgId, offlineHours, operatorId ?? null],
     );
 
     const byType = await rows(
       `SELECT coalesce(nullif(v.make, ''), 'Não informado') AS label, count(*)::int AS total
-         FROM vehicles v WHERE v.organization_id = $1
+         FROM vehicles v
+        WHERE v.organization_id = $1 AND ($2::uuid IS NULL OR v.operator_id = $2::uuid)
         GROUP BY 1 ORDER BY 2 DESC LIMIT 10`,
-      [me.orgId],
+      [me.orgId, operatorId ?? null],
     );
 
     const bySite = await rows(
       `SELECT coalesce(g.name, 'Sem grupo') AS label, count(*)::int AS total
          FROM vehicles v
-         LEFT JOIN t7_groups g ON g.organization_id = v.organization_id AND g.group_id = v.site_id
-        WHERE v.organization_id = $1
+         LEFT JOIN t7_groups g ON g.operator_id = v.operator_id AND g.group_id = v.site_id
+        WHERE v.organization_id = $1 AND ($2::uuid IS NULL OR v.operator_id = $2::uuid)
         GROUP BY 1 ORDER BY 2 DESC LIMIT 10`,
-      [me.orgId],
+      [me.orgId, operatorId ?? null],
     );
 
     return { summary, byType, bySite };
@@ -190,18 +204,30 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
   /** Opções para os filtros da tela. */
   app.get('/filters', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
+    const { operatorId } = z.object({ operatorId: z.string().uuid().optional() }).parse(request.query);
+    const scope = [me.orgId, operatorId ?? null];
     const [makes, fuelTypes, sites] = await Promise.all([
-      rows(`SELECT DISTINCT make AS value FROM vehicles WHERE organization_id = $1 AND make IS NOT NULL AND make <> '' ORDER BY 1`, [me.orgId]),
-      rows(`SELECT DISTINCT fuel_type AS value FROM vehicles WHERE organization_id = $1 AND fuel_type IS NOT NULL AND fuel_type <> '' ORDER BY 1`, [me.orgId]),
+      rows(
+        `SELECT DISTINCT make AS value FROM vehicles
+          WHERE organization_id = $1 AND ($2::uuid IS NULL OR operator_id = $2::uuid)
+            AND make IS NOT NULL AND make <> '' ORDER BY 1`,
+        scope,
+      ),
+      rows(
+        `SELECT DISTINCT fuel_type AS value FROM vehicles
+          WHERE organization_id = $1 AND ($2::uuid IS NULL OR operator_id = $2::uuid)
+            AND fuel_type IS NOT NULL AND fuel_type <> '' ORDER BY 1`,
+        scope,
+      ),
       rows(
         `SELECT g.group_id AS value, g.name AS label, count(v.asset_id)::int AS total
            FROM t7_groups g
-           LEFT JOIN vehicles v ON v.organization_id = g.organization_id AND v.site_id = g.group_id
-          WHERE g.organization_id = $1
+           LEFT JOIN vehicles v ON v.operator_id = g.operator_id AND v.site_id = g.group_id
+          WHERE g.organization_id = $1 AND ($2::uuid IS NULL OR g.operator_id = $2::uuid)
           GROUP BY g.group_id, g.name
          HAVING count(v.asset_id) > 0
           ORDER BY g.name`,
-        [me.orgId],
+        scope,
       ),
     ]);
     return { makes: makes.map((m) => m.value), fuelTypes: fuelTypes.map((f) => f.value), sites };
@@ -219,6 +245,7 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
     );
 
     const csv = toCsv(data, [
+      { key: 'operator_name', label: 'Empresa operadora' },
       { key: 'asset_id', label: 'ID Track7' },
       { key: 'description', label: 'Veículo' },
       { key: 'registration_number', label: 'Placa' },
@@ -246,27 +273,28 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
     const me = currentUser(request);
     const { assetId } = z.object({ assetId: z.coerce.number() }).parse(request.params);
 
-    const vehicle = await one(`${BASE_SELECT} WHERE v.organization_id = $1 AND v.asset_id = $3`, [
-      me.orgId,
-      24,
-      assetId,
-    ]);
+    const { operatorId } = z.object({ operatorId: z.string().uuid().optional() }).parse(request.query);
+    const vehicle = await one<{ operator_id: string }>(
+      `${BASE_SELECT}
+        WHERE v.organization_id = $1 AND ($3::uuid IS NULL OR v.operator_id = $3::uuid) AND v.asset_id = $4`,
+      [me.orgId, 24, operatorId ?? null, assetId],
+    );
     if (!vehicle) throw notFound('Veículo não encontrado.');
 
     const [trips, events, stats] = await Promise.all([
       rows(
         `SELECT trip_id, driver_id, trip_start, trip_end, distance_km, duration_seconds,
                 driving_seconds, standing_seconds, max_speed_kmh, start_address, end_address
-           FROM trips WHERE organization_id = $1 AND asset_id = $2
+           FROM trips WHERE operator_id = $1 AND asset_id = $2
           ORDER BY trip_start DESC LIMIT 15`,
-        [me.orgId, assetId],
+        [vehicle.operator_id, assetId],
       ),
       rows(
         `SELECT event_id, event_category, event_description, start_at, end_at, value, value_units,
                 speed_limit, total_seconds, start_address
-           FROM telemetry_events WHERE organization_id = $1 AND asset_id = $2
+           FROM telemetry_events WHERE operator_id = $1 AND asset_id = $2
           ORDER BY start_at DESC LIMIT 15`,
-        [me.orgId, assetId],
+        [vehicle.operator_id, assetId],
       ),
       one(
         `SELECT
@@ -275,8 +303,8 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
            coalesce(sum(driving_seconds), 0)::int          AS conducao_30d_seg,
            coalesce(max(max_speed_kmh), 0)::numeric        AS velocidade_maxima_30d
          FROM trips
-        WHERE organization_id = $1 AND asset_id = $2 AND trip_start >= now() - interval '30 days'`,
-        [me.orgId, assetId],
+        WHERE operator_id = $1 AND asset_id = $2 AND trip_start >= now() - interval '30 days'`,
+        [vehicle.operator_id, assetId],
       ),
     ]);
 
@@ -298,14 +326,20 @@ export async function vehiclesRoutes(app: FastifyInstance): Promise<void> {
     const to = q.to ?? new Date();
     const from = q.from ?? new Date(to.getTime() - 24 * 3600_000);
 
+    const owner = await one<{ operator_id: string }>(
+      `SELECT operator_id FROM vehicles WHERE organization_id = $1 AND asset_id = $2 LIMIT 1`,
+      [me.orgId, assetId],
+    );
+    if (!owner) throw notFound('Veículo não encontrado.');
+
     const data = await rows(
       `SELECT position_id, recorded_at, latitude, longitude, speed_kmh, heading,
               odometer_km, formatted_address
          FROM positions
-        WHERE organization_id = $1 AND asset_id = $2 AND recorded_at BETWEEN $3 AND $4
+        WHERE operator_id = $1 AND asset_id = $2 AND recorded_at BETWEEN $3 AND $4
         ORDER BY recorded_at DESC
         LIMIT $5`,
-      [me.orgId, assetId, from, to, q.limit],
+      [owner.operator_id, assetId, from, to, q.limit],
     );
     return { data, from, to };
   });

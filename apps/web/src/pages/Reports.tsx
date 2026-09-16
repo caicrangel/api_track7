@@ -2,6 +2,7 @@ import { useMutation, useQuery } from '@tanstack/react-query';
 import { Download, FileBarChart, History, Play } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
 import { api, downloadFile } from '../lib/api';
+import { useOperator } from '../lib/operator';
 import { formatByType, formatDateTime, formatNumber } from '../lib/format';
 import {
   Alert,
@@ -67,6 +68,7 @@ function daysAgo(days: number): string {
 }
 
 export function ReportsPage() {
+  const { operatorId, operator } = useOperator();
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
   const [params, setParams] = useState<Record<string, string>>({});
   const [result, setResult] = useState<ReportResult | null>(null);
@@ -91,6 +93,7 @@ export function ReportsPage() {
           duration_ms: number;
           created_at: string;
           created_by_name: string | null;
+          operator_name: string | null;
         }>;
       }>('/reports/executions'),
     enabled: showHistory,
@@ -131,7 +134,7 @@ export function ReportsPage() {
     mutationFn: () =>
       api<ReportResult>(`/reports/${selectedCode}/run`, {
         method: 'POST',
-        body: { params, format: 'json' },
+        body: { params, format: 'json', operatorId: operatorId ?? undefined },
       }),
     onSuccess: (data) => {
       setResult(data);
@@ -150,7 +153,7 @@ export function ReportsPage() {
       await downloadFile(
         `/reports/${selectedCode}/run`,
         `${selectedCode}-${today()}.csv`,
-        { method: 'POST', body: { params, format: 'csv' } },
+        { method: 'POST', body: { params, format: 'csv', operatorId: operatorId ?? undefined } },
       );
     } catch (err) {
       setError((err as Error).message);
@@ -164,7 +167,11 @@ export function ReportsPage() {
       <PageHeader
         icon={<FileBarChart className="h-6 w-6" />}
         title="Relatórios"
-        subtitle="Relatórios gerenciais sobre os dados da telemetria — prontos para customização conforme o órgão gestor."
+        subtitle={
+          operator
+            ? `Relatórios de ${operator.shortName ?? operator.name}.`
+            : 'Relatórios consolidados de todas as empresas operadoras.'
+        }
         actions={
           <Button icon={<History className="h-4 w-4" />} onClick={() => setShowHistory((v) => !v)}>
             {showHistory ? 'Ocultar histórico' : 'Histórico'}
@@ -186,6 +193,7 @@ export function ReportsPage() {
               <thead className="bg-slate-50">
                 <tr>
                   <Th>Relatório</Th>
+                  <Th>Empresa</Th>
                   <Th>Situação</Th>
                   <Th>Linhas</Th>
                   <Th>Duração</Th>
@@ -197,6 +205,7 @@ export function ReportsPage() {
                 {history.data.executions.map((item) => (
                   <tr key={item.id}>
                     <Td>{item.report_code}</Td>
+                    <Td>{item.operator_name ?? 'Consolidado'}</Td>
                     <Td>
                       <Badge tone={item.status === 'SUCCESS' ? 'success' : 'danger'}>{item.status}</Badge>
                     </Td>
@@ -298,7 +307,7 @@ export function ReportsPage() {
                   <Table>
                     <thead className="sticky top-0 bg-slate-50">
                       <tr>
-                        {result.report.columns.map((column) => (
+                        {visibleColumns(result.report.columns, operatorId).map((column) => (
                           <Th key={column.key}>{column.label}</Th>
                         ))}
                       </tr>
@@ -306,7 +315,7 @@ export function ReportsPage() {
                     <tbody className="divide-y divide-slate-100">
                       {result.data.map((row, index) => (
                         <tr key={index} className="hover:bg-slate-50/70">
-                          {result.report.columns.map((column) => (
+                          {visibleColumns(result.report.columns, operatorId).map((column) => (
                             <Td key={column.key}>{formatByType(row[column.key], column.type)}</Td>
                           ))}
                         </tr>
@@ -326,6 +335,11 @@ export function ReportsPage() {
       </div>
     </>
   );
+}
+
+/** A coluna "Empresa operadora" só faz sentido na visão consolidada. */
+function visibleColumns(columns: ReportColumn[], operatorId: string | null): ReportColumn[] {
+  return operatorId ? columns.filter((c) => c.key !== 'empresa') : columns;
 }
 
 function ParamField({

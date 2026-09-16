@@ -15,6 +15,8 @@ import { collectPositions } from './modules/integration/position-stream.js';
 
 interface ScheduleRow {
   organization_id: string;
+  operator_id: string;
+  operator_name: string;
   sync_cron: string;
   sync_enabled: boolean;
   stream_enabled: boolean;
@@ -22,7 +24,14 @@ interface ScheduleRow {
 }
 
 const tasks = new Map<string, { cronExpression: string; task: ScheduledTask }>();
-const streams = new Map<string, { intervalSeconds: number; timer: NodeJS.Timeout; running: boolean }>();
+interface StreamEntry {
+  intervalSeconds: number;
+  timer: NodeJS.Timeout | null;
+  startTimer: NodeJS.Timeout | null;
+  running: boolean;
+}
+
+const streams = new Map<string, StreamEntry>();
 
 function log(message: string, extra?: unknown): void {
   const stamp = new Date().toISOString();
@@ -32,24 +41,26 @@ function log(message: string, extra?: unknown): void {
 
 async function refreshSchedules(): Promise<void> {
   const schedules = await rows<ScheduleRow>(
-    `SELECT organization_id, sync_cron, sync_enabled, stream_enabled, stream_interval_seconds
-       FROM integration_credentials
-      WHERE provider = 'track7'
-        AND client_id_enc IS NOT NULL`,
+    `SELECT c.organization_id, c.operator_id, op.name AS operator_name,
+            c.sync_cron, c.sync_enabled, c.stream_enabled, c.stream_interval_seconds
+       FROM integration_credentials c
+       JOIN operators op ON op.id = c.operator_id AND op.status = 'ACTIVE'
+      WHERE c.provider = 'track7'
+        AND c.client_id_enc IS NOT NULL`,
   );
 
   const seen = new Set<string>();
 
-  for (const schedule of schedules) {
-    seen.add(schedule.organization_id);
-    applyStreamCollector(schedule);
-    const existing = tasks.get(schedule.organization_id);
+  for (const [index, schedule] of schedules.entries()) {
+    seen.add(schedule.operator_id);
+    applyStreamCollector(schedule, index, schedules.length);
+    const existing = tasks.get(schedule.operator_id);
 
     if (!schedule.sync_enabled) {
       if (existing) {
         existing.task.stop();
-        tasks.delete(schedule.organization_id);
-        log(`sincronização desativada para a organização ${schedule.organization_id}`);
+        tasks.delete(schedule.operator_id);
+        log(`sincronização desativada — operadora ${schedule.operator_name}`);
       }
       continue;
     }
@@ -58,16 +69,17 @@ async function refreshSchedules(): Promise<void> {
     if (existing) existing.task.stop();
 
     if (!cron.validate(schedule.sync_cron)) {
-      log(`expressão cron inválida (${schedule.sync_cron}) — organização ${schedule.organization_id}`);
+      log(`expressão cron inválida (${schedule.sync_cron}) — operadora ${schedule.operator_name}`);
       continue;
     }
 
     const task = cron.schedule(
       schedule.sync_cron,
       () => {
-        log(`iniciando sincronização agendada — organização ${schedule.organization_id}`);
+        log(`iniciando sincronização agendada — operadora ${schedule.operator_name}`);
         void runSync({
           organizationId: schedule.organization_id,
+          operatorId: schedule.operator_id,
           kind: 'incremental',
           triggerSource: 'schedule',
         })
@@ -77,71 +89,90 @@ async function refreshSchedules(): Promise<void> {
       { timezone: env.TZ },
     );
 
-    tasks.set(schedule.organization_id, { cronExpression: schedule.sync_cron, task });
-    log(`agendamento ativo (${schedule.sync_cron}) — organização ${schedule.organization_id}`);
+    tasks.set(schedule.operator_id, { cronExpression: schedule.sync_cron, task });
+    log(`agendamento ativo (${schedule.sync_cron}) — operadora ${schedule.operator_name}`);
   }
 
-  for (const [organizationId, entry] of tasks) {
-    if (!seen.has(organizationId)) {
+  for (const [operatorId, entry] of tasks) {
+    if (!seen.has(operatorId)) {
       entry.task.stop();
-      tasks.delete(organizationId);
+      tasks.delete(operatorId);
     }
   }
-  for (const [organizationId, entry] of streams) {
-    if (!seen.has(organizationId)) {
-      clearInterval(entry.timer);
-      streams.delete(organizationId);
+  for (const [operatorId, entry] of streams) {
+    if (!seen.has(operatorId)) {
+      stopStream(entry);
+      streams.delete(operatorId);
     }
   }
+}
+
+function stopStream(entry: StreamEntry): void {
+  if (entry.timer) clearInterval(entry.timer);
+  if (entry.startTimer) clearTimeout(entry.startTimer);
 }
 
 /**
  * Liga (ou reconfigura) o coletor contínuo de posições da organização.
  * O ciclo nunca se sobrepõe: se o anterior ainda roda, este é pulado.
  */
-function applyStreamCollector(schedule: ScheduleRow): void {
-  const organizationId = schedule.organization_id;
+function applyStreamCollector(schedule: ScheduleRow, index: number, total: number): void {
+  const { organization_id: organizationId, operator_id: operatorId, operator_name: operatorName } = schedule;
   const intervalSeconds = Math.max(10, schedule.stream_interval_seconds ?? 30);
-  const existing = streams.get(organizationId);
+  const existing = streams.get(operatorId);
 
   if (!schedule.stream_enabled) {
     if (existing) {
-      clearInterval(existing.timer);
-      streams.delete(organizationId);
-      log(`coletor de posições desativado — organização ${organizationId}`);
+      stopStream(existing);
+      streams.delete(operatorId);
+      log(`coletor de posições desativado — operadora ${operatorName}`);
     }
     return;
   }
 
   if (existing && existing.intervalSeconds === intervalSeconds) return;
-  if (existing) clearInterval(existing.timer);
+  if (existing) stopStream(existing);
 
-  const entry = {
-    intervalSeconds,
-    running: false,
-    timer: setInterval(() => {
-      const current = streams.get(organizationId);
-      if (!current || current.running) return; // ciclo anterior ainda em andamento
-      current.running = true;
-      void collectPositions(organizationId)
-        .then((result) => {
-          if (result.gapDetected) {
-            log(`lacuna detectada no histórico — organização ${organizationId}: rode um backfill`);
-          }
-          if (result.collected > 0) {
-            log(`posições coletadas: ${result.collected} em ${result.pages} página(s) (${result.durationMs} ms)`);
-          }
-        })
-        .catch((err) => log(`falha no coletor de posições: ${(err as Error).message}`))
-        .finally(() => {
-          const c = streams.get(organizationId);
-          if (c) c.running = false;
-        });
-    }, intervalSeconds * 1000),
+  const runCycle = () => {
+    const current = streams.get(operatorId);
+    if (!current || current.running) return; // ciclo anterior ainda em andamento
+    current.running = true;
+    void collectPositions(organizationId, operatorId)
+      .then((result) => {
+        if (result.gapDetected) {
+          log(`lacuna no histórico — operadora ${operatorName}: rode um backfill`);
+        }
+        if (result.collected > 0) {
+          log(`${operatorName}: ${result.collected} posição(ões) em ${result.pages} página(s) (${result.durationMs} ms)`);
+        }
+      })
+      .catch((err) => log(`falha no coletor — operadora ${operatorName}: ${(err as Error).message}`))
+      .finally(() => {
+        const c = streams.get(operatorId);
+        if (c) c.running = false;
+      });
   };
 
-  streams.set(organizationId, entry);
-  log(`coletor de posições ativo (a cada ${intervalSeconds}s) — organização ${organizationId}`);
+  // Distribui os coletores dentro do intervalo: com dezenas de operadoras,
+  // disparar todas no mesmo segundo criaria picos na API. A defasagem entra
+  // antes de iniciar o intervalo, para que os ciclos sigam espaçados.
+  const jitterMs = total > 1 ? Math.round((index / total) * intervalSeconds * 1000) : 0;
+
+  const entry: StreamEntry = {
+    intervalSeconds,
+    running: false,
+    timer: null,
+    startTimer: setTimeout(() => {
+      runCycle();
+      const current = streams.get(operatorId);
+      if (current) current.timer = setInterval(runCycle, intervalSeconds * 1000);
+    }, jitterMs),
+  };
+  streams.set(operatorId, entry);
+
+  log(
+    `coletor ativo (a cada ${intervalSeconds}s, defasagem ${(jitterMs / 1000).toFixed(1)}s) — operadora ${operatorName}`,
+  );
 }
 
 async function main(): Promise<void> {
@@ -159,7 +190,7 @@ async function main(): Promise<void> {
   const shutdown = async () => {
     log('encerrando worker...');
     for (const { task } of tasks.values()) task.stop();
-    for (const { timer } of streams.values()) clearInterval(timer);
+    for (const entry of streams.values()) stopStream(entry);
     await pool.end().catch(() => {});
     await closeRedis();
     process.exit(0);

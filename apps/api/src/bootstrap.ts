@@ -3,6 +3,7 @@ import { runMigrations, ensurePartitions } from './db/migrate.js';
 import { env } from './env.js';
 import { hashPassword } from './lib/crypto.js';
 import { saveCredentials, getCredentialRow } from './modules/integration/credentials.js';
+import { listOperators } from './modules/operators/operators-service.js';
 import { REPORTS } from './modules/reports/report-catalog.js';
 
 function slugify(value: string): string {
@@ -17,6 +18,7 @@ function slugify(value: string): string {
 
 export interface BootstrapResult {
   organizationId: string;
+  operatorId: string;
   createdAdmin: boolean;
 }
 
@@ -47,6 +49,19 @@ export async function bootstrap(log: (msg: string) => void = console.log): Promi
 
   const organizationId = org!.id;
 
+  // Toda conta começa com uma empresa operadora — é ela que guarda as
+  // credenciais da Track7 e os dados sincronizados.
+  let operators = await listOperators(organizationId);
+  if (!operators.length) {
+    await query(
+      `INSERT INTO operators (organization_id, name, short_name) VALUES ($1, $2, $2)`,
+      [organizationId, env.BOOTSTRAP_ORG_NAME],
+    );
+    operators = await listOperators(organizationId);
+    log(`[bootstrap] empresa operadora criada: ${env.BOOTSTRAP_ORG_NAME}`);
+  }
+  const operatorId = operators[0].id;
+
   const admin = await one<{ id: string }>(`SELECT id FROM users WHERE organization_id = $1 LIMIT 1`, [
     organizationId,
   ]);
@@ -67,10 +82,10 @@ export async function bootstrap(log: (msg: string) => void = console.log): Promi
   }
 
   // Credenciais Track7 vindas do .env (apenas na primeira vez)
-  const credentials = await getCredentialRow(organizationId);
+  const credentials = await getCredentialRow(operatorId);
   const hasEnvCredentials = Boolean(env.TRACK7_CLIENT_ID && env.TRACK7_CLIENT_SECRET && env.TRACK7_USERNAME);
   if (!credentials || (!credentials.client_id_enc && hasEnvCredentials)) {
-    await saveCredentials(organizationId, {
+    await saveCredentials(organizationId, operatorId, {
       region: 'us',
       identityUrl: env.TRACK7_IDENTITY_URL,
       apiUrl: env.TRACK7_API_URL,
@@ -109,5 +124,5 @@ export async function bootstrap(log: (msg: string) => void = console.log): Promi
     );
   }
 
-  return { organizationId, createdAdmin };
+  return { organizationId, operatorId, createdAdmin };
 }

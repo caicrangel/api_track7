@@ -4,6 +4,7 @@ import { one, rows } from '../../db/pool.js';
 import { authenticate, currentUser } from '../../lib/auth-guard.js';
 
 const listSchema = z.object({
+  operatorId: z.string().uuid().optional(),
   search: z.string().trim().optional(),
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(200).default(25),
@@ -15,8 +16,8 @@ export async function driversRoutes(app: FastifyInstance): Promise<void> {
     const me = currentUser(request);
     const q = listSchema.parse(request.query);
 
-    const params: unknown[] = [me.orgId];
-    const where = ['d.organization_id = $1'];
+    const params: unknown[] = [me.orgId, q.operatorId ?? null];
+    const where = ['d.organization_id = $1', '($2::uuid IS NULL OR d.operator_id = $2::uuid)'];
     if (!q.includeSystem) where.push('d.is_system_driver = false');
     if (q.search) {
       params.push(`%${q.search}%`);
@@ -31,9 +32,11 @@ export async function driversRoutes(app: FastifyInstance): Promise<void> {
 
     const data = await rows(
       `SELECT d.driver_id, d.name, d.employee_number, d.mobile_number, d.email,
-              d.extended_driver_id, d.site_id, g.name AS site_name, d.synced_at
+              d.extended_driver_id, d.site_id, g.name AS site_name, d.synced_at,
+              d.operator_id, op.name AS operator_name
          FROM drivers d
-         LEFT JOIN t7_groups g ON g.organization_id = d.organization_id AND g.group_id = d.site_id
+         JOIN operators op ON op.id = d.operator_id
+         LEFT JOIN t7_groups g ON g.operator_id = d.operator_id AND g.group_id = d.site_id
         WHERE ${where.join(' AND ')}
         ORDER BY d.name NULLS LAST
         LIMIT $${params.length - 1} OFFSET $${params.length}`,

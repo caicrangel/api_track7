@@ -14,13 +14,20 @@ import {
 import { listSyncRuns, runSync } from './sync-service.js';
 import { backfillPositions, collectPositions, getCursor, seedCursor } from './position-stream.js';
 import { TRACK7_REGIONS } from './track7-client.js';
+import { resolveOperator } from '../operators/operators-service.js';
+
+/** Toda rota de integração age sobre uma empresa operadora específica. */
+const operatorQuerySchema = z.object({ operatorId: z.string().uuid().optional() });
 
 export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   /** Configuração atual (sem segredos) + presets de região. */
   app.get('/track7', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
-    const row = await getCredentialRow(me.orgId);
+    const { operatorId } = operatorQuerySchema.parse(request.query);
+    const operator = await resolveOperator(me.orgId, operatorId);
+    const row = await getCredentialRow(operator.id);
     return {
+      operator: { id: operator.id, name: operator.name },
       integration: toPublicView(row),
       regions: Object.entries(TRACK7_REGIONS).map(([key, value]) => ({ key, ...value })),
     };
@@ -29,25 +36,35 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   /** Salva credenciais (campos de segredo vazios preservam o valor atual). */
   app.put('/track7', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
     const me = currentUser(request);
-    const input = credentialsInputSchema.parse(request.body);
-    const saved = await saveCredentials(me.orgId, input);
+    const { operatorId, ...body } = z
+      .object({ operatorId: z.string().uuid().optional() })
+      .passthrough()
+      .parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, operatorId as string | undefined);
+    const input = credentialsInputSchema.parse(body);
+    const saved = await saveCredentials(me.orgId, operator.id, input);
     await recordAudit({
       organizationId: me.orgId,
       userId: me.sub,
       action: 'integration.track7.save',
       entity: 'integration',
-      metadata: { region: saved.region, apiUrl: saved.api_url },
+      metadata: { operator: operator.name, region: saved.region, apiUrl: saved.api_url },
       ip: request.ip,
     });
-    return { integration: toPublicView(saved) };
+    return { operator: { id: operator.id, name: operator.name }, integration: toPublicView(saved) };
   });
 
   /** Testa a conexão com a API da Track7 (autentica e lista organizações). */
   app.post('/track7/test', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
     const me = currentUser(request);
-    const input = credentialsInputSchema.partial().parse(request.body ?? {});
+    const { operatorId, ...body } = z
+      .object({ operatorId: z.string().uuid().optional() })
+      .passthrough()
+      .parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, operatorId as string | undefined);
+    const input = credentialsInputSchema.partial().parse(body);
     const startedAt = Date.now();
-    const client = await buildEphemeralClient(me.orgId, { region: 'us', ...input });
+    const client = await buildEphemeralClient(operator.id, { region: 'us', ...input });
     try {
       const result = await client.testConnection();
       await recordAudit({
@@ -78,10 +95,13 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   /** Grupos/sites disponíveis — da base local ou direto da Track7 (?live=true). */
   app.get('/track7/groups', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
-    const { live } = z.object({ live: z.coerce.boolean().default(false) }).parse(request.query);
+    const { live, operatorId } = z
+      .object({ live: z.coerce.boolean().default(false), operatorId: z.string().uuid().optional() })
+      .parse(request.query);
+    const operator = await resolveOperator(me.orgId, operatorId);
 
     if (live) {
-      const { client, row } = await buildClient(me.orgId);
+      const { client, row } = await buildClient(operator.id);
       const orgs = await client.getOrganisationGroups();
       const rootId = row.organisation_id ?? Number(orgs[0]?.GroupId);
       const tree = rootId ? await client.getSubGroups(rootId) : null;
@@ -90,8 +110,8 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
 
     const data = await rows(
       `SELECT group_id, parent_group_id, name, group_type, group_type_name, time_zone, level, is_organisation
-         FROM t7_groups WHERE organization_id = $1 ORDER BY level, name`,
-      [me.orgId],
+         FROM t7_groups WHERE operator_id = $1 ORDER BY level, name`,
+      [operator.id],
     );
     return { groups: data };
   });
@@ -101,15 +121,18 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const me = currentUser(request);
     const body = z
       .object({
+        operatorId: z.string().uuid().optional(),
         kind: z.enum(['catalog', 'incremental', 'history']).default('incremental'),
         wait: z.boolean().default(false),
         from: z.coerce.date().optional(),
         to: z.coerce.date().optional(),
       })
       .parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, body.operatorId);
 
     const options = {
       organizationId: me.orgId,
+      operatorId: operator.id,
       kind: body.kind,
       triggerSource: 'manual' as const,
       userId: me.sub,
@@ -121,7 +144,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       organizationId: me.orgId,
       userId: me.sub,
       action: 'integration.track7.sync',
-      metadata: { kind: body.kind },
+      metadata: { kind: body.kind, operator: operator.name },
       ip: request.ip,
     });
 
@@ -137,37 +160,49 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   /** Histórico de sincronizações. */
   app.get('/track7/sync-runs', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
-    const { limit } = z.object({ limit: z.coerce.number().int().min(1).max(100).default(20) }).parse(request.query);
-    return { runs: await listSyncRuns(me.orgId, limit) };
+    const { limit, operatorId } = z
+      .object({
+        limit: z.coerce.number().int().min(1).max(100).default(20),
+        operatorId: z.string().uuid().optional(),
+      })
+      .parse(request.query);
+    return { runs: await listSyncRuns(me.orgId, limit, operatorId) };
   });
 
   /** Situação do coletor contínuo de posições. */
   app.get('/track7/stream', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
-    const cursor = await getCursor(me.orgId);
+    const { operatorId } = operatorQuerySchema.parse(request.query);
+    const operator = await resolveOperator(me.orgId, operatorId);
+    const cursor = await getCursor(operator.id);
     const stats = await one<{ total: number; ultimas_24h: number; ultima: Date | null; veiculos: number }>(
       `SELECT count(*)::bigint AS total,
               count(*) FILTER (WHERE recorded_at >= now() - interval '24 hours')::bigint AS ultimas_24h,
               max(recorded_at) AS ultima,
               count(DISTINCT asset_id)::int AS veiculos
          FROM positions
-        WHERE organization_id = $1 AND recorded_at >= now() - interval '7 days'`,
-      [me.orgId],
+        WHERE operator_id = $1 AND recorded_at >= now() - interval '7 days'`,
+      [operator.id],
     );
-    return { cursor, stats };
+    return { operator: { id: operator.id, name: operator.name }, cursor, stats };
   });
 
   /** Executa um ciclo do coletor sob demanda (útil para testar a conexão). */
   app.post('/track7/stream/collect', { preHandler: requireRole('ADMIN', 'MANAGER', 'OPERATOR') }, async (request) => {
     const me = currentUser(request);
-    return collectPositions(me.orgId);
+    const { operatorId } = z.object({ operatorId: z.string().uuid().optional() }).parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, operatorId);
+    return collectPositions(me.orgId, operator.id);
   });
 
   /** Reposiciona o ponteiro do fluxo (a partir de uma data ou do presente). */
   app.post('/track7/stream/seed', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
     const me = currentUser(request);
-    const { from } = z.object({ from: z.coerce.date().optional() }).parse(request.body ?? {});
-    const token = await seedCursor(me.orgId, from);
+    const { from, operatorId } = z
+      .object({ from: z.coerce.date().optional(), operatorId: z.string().uuid().optional() })
+      .parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, operatorId);
+    const token = await seedCursor(me.orgId, operator.id, from);
     await recordAudit({
       organizationId: me.orgId,
       userId: me.sub,
@@ -181,9 +216,14 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
   /** Preenche lacunas do histórico por período (consulta from/to). */
   app.post('/track7/stream/backfill', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
     const me = currentUser(request);
-    const { from, to } = z
-      .object({ from: z.coerce.date(), to: z.coerce.date().default(() => new Date()) })
+    const { from, to, operatorId } = z
+      .object({
+        from: z.coerce.date(),
+        to: z.coerce.date().default(() => new Date()),
+        operatorId: z.string().uuid().optional(),
+      })
       .parse(request.body ?? {});
+    const operator = await resolveOperator(me.orgId, operatorId);
     await recordAudit({
       organizationId: me.orgId,
       userId: me.sub,
@@ -191,13 +231,15 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       metadata: { from, to },
       ip: request.ip,
     });
-    return backfillPositions(me.orgId, from, to);
+    return backfillPositions(me.orgId, operator.id, from, to);
   });
 
   /** Diagnóstico ponta a ponta da integração. */
   app.get('/track7/diagnostics', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
     const me = currentUser(request);
-    const row = await getCredentialRow(me.orgId);
+    const { operatorId } = operatorQuerySchema.parse(request.query);
+    const operator = await resolveOperator(me.orgId, operatorId);
+    const row = await getCredentialRow(operator.id);
     const checks: Array<{ name: string; status: 'ok' | 'warn' | 'error'; detail: string }> = [];
 
     const view = toPublicView(row);
@@ -213,7 +255,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     if (view.configured) {
       const t0 = Date.now();
       try {
-        const { client } = await buildClient(me.orgId);
+        const { client } = await buildClient(operator.id);
         await client.getAccessToken(true);
         tokenOk = true;
         checks.push({
@@ -228,7 +270,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
 
     if (tokenOk) {
       try {
-        const { client } = await buildClient(me.orgId);
+        const { client } = await buildClient(operator.id);
         const orgs = await client.getOrganisationGroups();
         checks.push({
           name: 'Organizações visíveis',
@@ -244,11 +286,11 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
 
     const counts = await one<{ vehicles: number; drivers: number; groups: number; positions: number }>(
       `SELECT
-         (SELECT count(*)::int FROM vehicles WHERE organization_id = $1) AS vehicles,
-         (SELECT count(*)::int FROM drivers WHERE organization_id = $1) AS drivers,
-         (SELECT count(*)::int FROM t7_groups WHERE organization_id = $1) AS groups,
-         (SELECT count(*)::int FROM vehicle_last_position WHERE organization_id = $1) AS positions`,
-      [me.orgId],
+         (SELECT count(*)::int FROM vehicles WHERE operator_id = $1) AS vehicles,
+         (SELECT count(*)::int FROM drivers WHERE operator_id = $1) AS drivers,
+         (SELECT count(*)::int FROM t7_groups WHERE operator_id = $1) AS groups,
+         (SELECT count(*)::int FROM vehicle_last_position WHERE operator_id = $1) AS positions`,
+      [operator.id],
     );
     checks.push({
       name: 'Dados sincronizados',
@@ -256,6 +298,6 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       detail: `${counts?.vehicles ?? 0} veículos · ${counts?.drivers ?? 0} motoristas · ${counts?.groups ?? 0} grupos · ${counts?.positions ?? 0} posições atuais.`,
     });
 
-    return { checks, integration: view, counts };
+    return { operator: { id: operator.id, name: operator.name }, checks, integration: view, counts };
   });
 }

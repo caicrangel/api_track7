@@ -14,6 +14,8 @@
  *
  * Este histórico é a matéria-prima do relatório georreferenciado exigido pela
  * SMMUR/SUMOB: número de ordem, data, hora, latitude e longitude por viagem.
+ *
+ * Cada empresa operadora tem o próprio ponteiro e o próprio coletor.
  */
 import { one, query } from '../../db/pool.js';
 import { acquireLock } from '../../lib/cache.js';
@@ -29,6 +31,7 @@ const TOKEN_SAFETY_MARGIN_MS = 12 * 3600_000;
 
 export interface StreamCursor {
   organization_id: string;
+  operator_id: string;
   since_token: string | null;
   token_updated_at: Date | null;
   last_run_at: Date | null;
@@ -49,11 +52,11 @@ export interface CollectResult {
   durationMs: number;
 }
 
-export async function getCursor(organizationId: string): Promise<StreamCursor | null> {
+export async function getCursor(operatorId: string): Promise<StreamCursor | null> {
   return one<StreamCursor>(
     `SELECT * FROM stream_cursors
-      WHERE organization_id = $1 AND provider = 'track7' AND stream = 'positions'`,
-    [organizationId],
+      WHERE operator_id = $1 AND provider = 'track7' AND stream = 'positions'`,
+    [operatorId],
   );
 }
 
@@ -75,21 +78,24 @@ function resolveToken(cursor: StreamCursor | null): { token: string; gap: boolea
  * Executa um ciclo do coletor: drena a fila da API e grava as posições.
  * Seguro para chamar em paralelo — um lock impede ciclos concorrentes.
  */
-export async function collectPositions(organizationId: string): Promise<CollectResult> {
+export async function collectPositions(
+  organizationId: string,
+  operatorId: string,
+): Promise<CollectResult> {
   const startedAt = Date.now();
-  const release = await acquireLock(`stream:${organizationId}`, 120);
+  const release = await acquireLock(`stream:${operatorId}`, 120);
   if (!release) {
     return { collected: 0, pages: 0, hasMoreItems: false, sinceToken: null, gapDetected: false, durationMs: 0 };
   }
 
   try {
-    const { row, client } = await buildClient(organizationId);
+    const { row, client } = await buildClient(operatorId);
     const organisationId = row.organisation_id;
     if (!organisationId) {
       throw new Error('Organização da Track7 ainda não identificada — rode uma sincronização de catálogo antes.');
     }
 
-    const cursor = await getCursor(organizationId);
+    const cursor = await getCursor(operatorId);
     const { token: startToken, gap } = resolveToken(cursor);
 
     if (gap && cursor?.token_updated_at) {
@@ -97,8 +103,8 @@ export async function collectPositions(organizationId: string): Promise<CollectR
       await query(
         `UPDATE stream_cursors
             SET last_gap_from = $2, last_gap_to = now(), updated_at = now()
-          WHERE organization_id = $1 AND provider = 'track7' AND stream = 'positions'`,
-        [organizationId, cursor.token_updated_at],
+          WHERE operator_id = $1 AND provider = 'track7' AND stream = 'positions'`,
+        [operatorId, cursor.token_updated_at],
       );
     }
 
@@ -117,7 +123,7 @@ export async function collectPositions(organizationId: string): Promise<CollectR
       hasMoreItems = result.hasMoreItems;
 
       if (result.items.length) {
-        collected += await upsertPositions(organizationId, result.items, true);
+        collected += await upsertPositions(organizationId, operatorId, result.items, true);
       }
 
       // sem token novo não dá para avançar: mantém o anterior e sai
@@ -125,7 +131,7 @@ export async function collectPositions(organizationId: string): Promise<CollectR
       token = result.nextSinceToken;
     } while (hasMoreItems && pages < MAX_PAGES_PER_CYCLE);
 
-    await saveCursor(organizationId, token, collected, null);
+    await saveCursor(organizationId, operatorId, token, collected, null);
 
     return {
       collected,
@@ -136,7 +142,7 @@ export async function collectPositions(organizationId: string): Promise<CollectR
       durationMs: Date.now() - startedAt,
     };
   } catch (err) {
-    await saveCursor(organizationId, null, 0, (err as Error).message);
+    await saveCursor(organizationId, operatorId, null, 0, (err as Error).message);
     throw err;
   } finally {
     await release();
@@ -145,30 +151,31 @@ export async function collectPositions(organizationId: string): Promise<CollectR
 
 async function saveCursor(
   organizationId: string,
+  operatorId: string,
   token: string | null,
   count: number,
   error: string | null,
 ): Promise<void> {
   if (error) {
     await query(
-      `INSERT INTO stream_cursors (organization_id, provider, stream, consecutive_errors, last_error, last_run_at, updated_at)
-       VALUES ($1,'track7','positions',1,$2, now(), now())
-       ON CONFLICT (organization_id, provider, stream) DO UPDATE SET
+      `INSERT INTO stream_cursors (organization_id, operator_id, provider, stream, consecutive_errors, last_error, last_run_at, updated_at)
+       VALUES ($1,$2,'track7','positions',1,$3, now(), now())
+       ON CONFLICT (operator_id, provider, stream) DO UPDATE SET
          consecutive_errors = stream_cursors.consecutive_errors + 1,
          last_error = EXCLUDED.last_error,
          last_run_at = now(),
          updated_at = now()`,
-      [organizationId, error],
+      [organizationId, operatorId, error],
     );
     return;
   }
 
   await query(
     `INSERT INTO stream_cursors
-       (organization_id, provider, stream, since_token, token_updated_at,
+       (organization_id, operator_id, provider, stream, since_token, token_updated_at,
         last_run_at, last_count, total_collected, consecutive_errors, last_error, updated_at)
-     VALUES ($1,'track7','positions',$2, now(), now(), $3, $4, 0, NULL, now())
-     ON CONFLICT (organization_id, provider, stream) DO UPDATE SET
+     VALUES ($1,$2,'track7','positions',$3, now(), now(), $4, $5, 0, NULL, now())
+     ON CONFLICT (operator_id, provider, stream) DO UPDATE SET
        since_token = EXCLUDED.since_token,
        token_updated_at = now(),
        last_run_at = now(),
@@ -177,7 +184,7 @@ async function saveCursor(
        consecutive_errors = 0,
        last_error = NULL,
        updated_at = now()`,
-    [organizationId, token, count, count],
+    [organizationId, operatorId, token, count, count],
   );
 }
 
@@ -188,14 +195,15 @@ async function saveCursor(
  */
 export async function backfillPositions(
   organizationId: string,
+  operatorId: string,
   from: Date,
   to: Date,
 ): Promise<{ collected: number; windows: number }> {
-  const { client } = await buildClient(organizationId);
+  const { client } = await buildClient(operatorId);
   const { rows } = await import('../../db/pool.js');
   const assets = await rows<{ asset_id: number }>(
-    `SELECT asset_id FROM vehicles WHERE organization_id = $1 AND status = 'ACTIVE'`,
-    [organizationId],
+    `SELECT asset_id FROM vehicles WHERE operator_id = $1 AND status = 'ACTIVE'`,
+    [operatorId],
   );
   const assetIds = assets.map((a) => Number(a.asset_id));
   if (!assetIds.length) return { collected: 0, windows: 0 };
@@ -209,23 +217,27 @@ export async function backfillPositions(
     windows += 1;
     for (const batch of chunk(assetIds, 50)) {
       const positions = await client.getPositionsByAssets(batch, windowStart, windowEnd);
-      collected += await upsertPositions(organizationId, positions, false);
+      collected += await upsertPositions(organizationId, operatorId, positions, false);
     }
   }
 
   // lacuna preenchida
   await query(
     `UPDATE stream_cursors SET last_gap_from = NULL, last_gap_to = NULL, updated_at = now()
-      WHERE organization_id = $1 AND provider = 'track7' AND stream = 'positions'`,
-    [organizationId],
+      WHERE operator_id = $1 AND provider = 'track7' AND stream = 'positions'`,
+    [operatorId],
   );
 
   return { collected, windows };
 }
 
 /** Semeia o ponteiro a partir de um instante conhecido (ou do presente). */
-export async function seedCursor(organizationId: string, from?: Date): Promise<string> {
+export async function seedCursor(
+  organizationId: string,
+  operatorId: string,
+  from?: Date,
+): Promise<string> {
   const token = from ? toSinceToken(from) : 'NEW';
-  await saveCursor(organizationId, token, 0, null);
+  await saveCursor(organizationId, operatorId, token, 0, null);
   return token;
 }

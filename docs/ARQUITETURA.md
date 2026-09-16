@@ -37,19 +37,38 @@ mantém a imagem Alpine pequena e o build reprodutível.
 ```
 organizations ──┬── users ── refresh_tokens
                 ├── audit_logs
-                ├── integration_credentials ── sync_runs
-                ├── t7_groups
-                ├── drivers
-                ├── vehicles ──┬── vehicle_last_position
-                │              ├── trips
-                │              └── telemetry_events
-                ├── positions  (particionada por mês)
-                └── report_definitions / report_executions
+                ├── report_definitions / report_executions
+                └── operators (empresas operadoras)
+                     ├── integration_credentials ── sync_runs
+                     ├── stream_cursors
+                     ├── t7_groups · t7_event_types
+                     ├── drivers
+                     ├── vehicles ──┬── vehicle_last_position
+                     │              ├── trips
+                     │              └── telemetry_events
+                     └── positions  (particionada por mês)
 ```
+
+### Organização × operadora
+
+A **organização** é a conta (o consórcio, ou uma empresa isolada). A **operadora**
+é a empresa de ônibus: tem credenciais próprias da Track7, coletor próprio, ponteiro
+de fluxo próprio e frota separada.
+
+Essa separação atende diretamente o ofício do órgão gestor — alínea (a), relação
+empresa operadora ↔ fornecedor de telemetria, e alínea (h), arquivos individualizados
+por empresa operadora — e é o que permite a conta do consórcio consultar as 33 empresas
+com um seletor, sem misturar dados.
+
+Nas consultas, `operatorId` ausente significa **visão consolidada** de todas as
+operadoras da conta; presente, restringe a uma. Ações que gravam (salvar credenciais,
+sincronizar, coletar) sempre exigem uma operadora definida.
 
 ### Chaves
 
-Tabelas sincronizadas usam chave natural composta `(organization_id, <id da Track7>)`.
+Tabelas sincronizadas usam chave natural composta `(operator_id, <id da Track7>)`.
+A chave é por operadora, e não por conta, porque nada garante que os identificadores
+da Track7 não se repitam entre contas diferentes da plataforma.
 Isso torna a sincronização um `INSERT … ON CONFLICT DO UPDATE` idempotente, sem
 consultas de leitura prévia e sem risco de duplicidade em execuções concorrentes.
 
@@ -76,7 +95,7 @@ antigo vira um `DROP TABLE` de partição.
 
 ```
 runSync(kind)
-  ├─ lock Redis  sync:{orgId}
+  ├─ lock Redis  sync:{operatorId}
   ├─ INSERT sync_runs (RUNNING)
   ├─ etapas: organizacao → grupos → veiculos → motoristas → posicoes_atuais → viagens → eventos
   │          cada etapa cronometrada e contabilizada
@@ -87,6 +106,29 @@ runSync(kind)
 Falha em uma etapa após outras terem concluído resulta em `PARTIAL`: o que já entrou
 permanece. Escritas usam `bulkUpsert`, que fatia os lotes conforme o limite de
 parâmetros do protocolo do Postgres.
+
+## Coletores por operadora
+
+O worker mantém um coletor de posições e um agendamento de sincronização **por
+operadora**. Os coletores entram com defasagem distribuída dentro do intervalo
+(`índice / total × intervalo`): com 33 operadoras a 30 s, um dispara a cada ~0,9 s,
+em vez de 33 chamadas simultâneas a cada 30 s.
+
+A configuração é relida a cada minuto — cadastrar uma operadora e salvar as
+credenciais dela basta para o coletor entrar no ar, sem reiniciar nada.
+
+### Dimensionamento
+
+A 30 s, cada veículo gera ~2.880 posições por dia.
+
+| Cenário | Veículos | Linhas/mês |
+|---------|----------|-----------|
+| Uma empresa | ~90 | ~7,5 milhões |
+| Consórcio | ~3.000 | ~260 milhões |
+
+A partição mensal de `positions` atende bem o primeiro caso. Passando de algumas
+centenas de veículos, o passo seguinte é partição semanal e política de retenção —
+a função `ensure_month_partitions` é o ponto de mudança.
 
 ## Autenticação
 

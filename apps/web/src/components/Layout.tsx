@@ -1,7 +1,10 @@
 import clsx from 'clsx';
+import clsx2 from 'clsx';
 import {
   BarChart3,
+  Building2,
   BookOpen,
+  Check,
   ChevronDown,
   CircleUser,
   FileBarChart,
@@ -14,9 +17,10 @@ import {
   UsersRound,
   X,
 } from 'lucide-react';
-import { useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type ReactNode } from 'react';
 import { NavLink, Outlet, useNavigate } from 'react-router-dom';
 import { useAuth, type Role } from '../lib/auth';
+import { useOperator } from '../lib/operator';
 
 interface NavItem {
   to: string;
@@ -34,6 +38,7 @@ const OPERATION_ITEMS: NavItem[] = [
 
 const GLOBAL_ITEMS: NavItem[] = [
   { to: '/configuracoes', label: 'Configurações', icon: <Settings2 className="h-[18px] w-[18px]" /> },
+  { to: '/operadoras', label: 'Operadoras', icon: <Building2 className="h-[18px] w-[18px]" />, roles: ['ADMIN', 'MANAGER'] },
   { to: '/usuarios', label: 'Usuários', icon: <Users className="h-[18px] w-[18px]" />, roles: ['ADMIN', 'MANAGER'] },
   { to: '/ajuda', label: 'Ajuda', icon: <BookOpen className="h-[18px] w-[18px]" /> },
   { to: '/perfil', label: 'Perfil', icon: <CircleUser className="h-[18px] w-[18px]" /> },
@@ -100,16 +105,7 @@ export function Layout() {
 
   const sidebar = (
     <div className="flex h-full flex-col bg-white">
-      <div className="flex items-center gap-2 border-b border-slate-100 px-5 py-4">
-        <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand-600 text-white">
-          <BarChart3 className="h-4 w-4" />
-        </div>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold text-slate-900">FleetGov</p>
-          <p className="truncate text-[11px] text-slate-400">{user?.organization_name ?? 'Gestão de frota'}</p>
-        </div>
-        <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />
-      </div>
+      <OperatorSwitcher organizationName={user?.organization_name} />
 
       <div className="flex-1 overflow-y-auto">
         <NavSection title="Operação" items={OPERATION_ITEMS} onNavigate={() => setMobileOpen(false)} />
@@ -170,6 +166,97 @@ export function Layout() {
           </div>
         </main>
       </div>
+    </div>
+  );
+}
+
+/**
+ * Seletor de empresa operadora — define o escopo de todas as telas.
+ * Com uma única operadora cadastrada vira apenas o cabeçalho da conta.
+ */
+function OperatorSwitcher({ organizationName }: { organizationName?: string }) {
+  const { operators, operatorId, operator, setOperatorId } = useOperator();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const multiple = operators.length > 1;
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (event: MouseEvent) => {
+      if (ref.current && !ref.current.contains(event.target as Node)) setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    return () => document.removeEventListener('mousedown', onClick);
+  }, [open]);
+
+  const label = operator?.shortName ?? operator?.name ?? (multiple ? 'Todas as operadoras' : organizationName);
+
+  return (
+    <div ref={ref} className="relative border-b border-slate-100">
+      <button
+        type="button"
+        disabled={!multiple}
+        onClick={() => setOpen((v) => !v)}
+        className={clsx2(
+          'flex w-full items-center gap-2 px-5 py-4 text-left transition',
+          multiple && 'hover:bg-slate-50',
+        )}
+      >
+        <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-brand-600 text-white">
+          <BarChart3 className="h-4 w-4" />
+        </div>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold text-slate-900">{label ?? 'FleetGov'}</p>
+          <p className="truncate text-[11px] text-slate-400">
+            {multiple ? `${operators.length} empresas operadoras` : (organizationName ?? 'Gestão de frota')}
+          </p>
+        </div>
+        {multiple && <ChevronDown className="h-4 w-4 shrink-0 text-slate-400" />}
+      </button>
+
+      {open && multiple && (
+        <div className="absolute left-3 right-3 top-[68px] z-30 max-h-[60vh] overflow-y-auto rounded-xl border border-slate-200 bg-white py-1 shadow-lg">
+          <button
+            onClick={() => {
+              setOperatorId(null);
+              setOpen(false);
+            }}
+            className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-sm hover:bg-slate-50"
+          >
+            <span className={operatorId === null ? 'font-medium text-brand-700' : 'text-slate-700'}>
+              Todas as operadoras
+            </span>
+            {operatorId === null && <Check className="h-4 w-4 text-brand-600" />}
+          </button>
+          <div className="my-1 border-t border-slate-100" />
+          {operators.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => {
+                setOperatorId(item.id);
+                setOpen(false);
+              }}
+              className="flex w-full items-center justify-between gap-2 px-3 py-2 text-left hover:bg-slate-50"
+            >
+              <span className="min-w-0">
+                <span
+                  className={clsx2(
+                    'block truncate text-sm',
+                    item.id === operatorId ? 'font-medium text-brand-700' : 'text-slate-700',
+                  )}
+                >
+                  {item.shortName ?? item.name}
+                </span>
+                <span className="block truncate text-[11px] text-slate-400">
+                  {item.stats?.veiculos ?? 0} veículos
+                  {item.stats?.credenciais === false ? ' · sem credenciais' : ''}
+                </span>
+              </span>
+              {item.id === operatorId && <Check className="h-4 w-4 shrink-0 text-brand-600" />}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }

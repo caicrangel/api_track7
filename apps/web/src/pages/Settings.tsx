@@ -15,6 +15,7 @@ import {
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
+import { useOperator } from '../lib/operator';
 import { formatDateTime, formatNumber } from '../lib/format';
 import {
   Alert,
@@ -256,8 +257,10 @@ const CRON_PRESETS: Array<{ value: string; label: string }> = [
 
 function IntegrationTab() {
   const { can } = useAuth();
+  const { operatorId, operator, operators } = useOperator();
   const queryClient = useQueryClient();
   const editable = can('ADMIN', 'MANAGER');
+  const scope = { operatorId: operatorId ?? undefined };
 
   const [form, setForm] = useState({
     region: 'us',
@@ -280,8 +283,9 @@ function IntegrationTab() {
   const [showHistory, setShowHistory] = useState(false);
 
   const { data, isLoading } = useQuery({
-    queryKey: ['integration-track7'],
-    queryFn: () => api<{ integration: IntegrationView; regions: RegionPreset[] }>('/integrations/track7'),
+    queryKey: ['integration-track7', operatorId],
+    queryFn: () =>
+      api<{ integration: IntegrationView; regions: RegionPreset[] }>('/integrations/track7', { query: scope }),
     refetchInterval: (query) =>
       (query.state.data as { integration: IntegrationView } | undefined)?.integration.lastSyncStatus === 'RUNNING'
         ? 5000
@@ -306,6 +310,7 @@ function IntegrationTab() {
   }, [data]);
 
   const payload = () => ({
+    operatorId: operatorId ?? undefined,
     region: form.region,
     identityUrl: form.identityUrl || undefined,
     apiUrl: form.apiUrl || undefined,
@@ -327,6 +332,7 @@ function IntegrationTab() {
       setForm((prev) => ({ ...prev, clientId: '', clientSecret: '', username: '', password: '' }));
       setFeedback({ tone: 'success', message: 'Credenciais salvas com segurança (cifradas no banco).' });
       void queryClient.invalidateQueries({ queryKey: ['integration-track7'] });
+      void queryClient.invalidateQueries({ queryKey: ['operators'] });
     },
     onError: (err: Error) => setFeedback({ tone: 'danger', message: err.message }),
   });
@@ -349,7 +355,10 @@ function IntegrationTab() {
 
   const sync = useMutation({
     mutationFn: (kind: 'catalog' | 'incremental' | 'history') =>
-      api<{ accepted?: boolean }>('/integrations/track7/sync', { method: 'POST', body: { kind } }),
+      api<{ accepted?: boolean }>('/integrations/track7/sync', {
+        method: 'POST',
+        body: { kind, operatorId: operatorId ?? undefined },
+      }),
     onSuccess: () => {
       setFeedback({ tone: 'info', message: 'Sincronização iniciada. Acompanhe pelo histórico.' });
       setTimeout(() => {
@@ -384,6 +393,22 @@ function IntegrationTab() {
           cifradas (AES-256-GCM) e nunca retornam para a tela — os campos aparecem vazios por segurança,
           preencha apenas para trocar.
         </p>
+
+        {!operatorId && operators.length > 1 && (
+          <div className="mt-4">
+            <Alert tone="warning" title="Selecione a empresa operadora">
+              As credenciais são individuais por operadora. Escolha uma no seletor do topo para configurar.
+            </Alert>
+          </div>
+        )}
+
+        {operator && operators.length > 1 && (
+          <div className="mt-4">
+            <Alert tone="info">
+              Configurando <strong>{operator.name}</strong>.
+            </Alert>
+          </div>
+        )}
 
         {feedback && (
           <div className="mt-4">
@@ -556,11 +581,16 @@ function IntegrationTab() {
         intervalSeconds={form.streamIntervalSeconds}
         onChange={(patch) => setForm({ ...form, ...patch })}
         configured={integration.configured}
+        operatorId={operatorId}
       />
 
-      <DiagnosticsModal open={showDiagnostics} onClose={() => setShowDiagnostics(false)} />
-      <GroupsModal open={showGroups} onClose={() => setShowGroups(false)} />
-      <SyncHistoryModal open={showHistory} onClose={() => setShowHistory(false)} />
+      <DiagnosticsModal
+        open={showDiagnostics}
+        onClose={() => setShowDiagnostics(false)}
+        operatorId={operatorId}
+      />
+      <GroupsModal open={showGroups} onClose={() => setShowGroups(false)} operatorId={operatorId} />
+      <SyncHistoryModal open={showHistory} onClose={() => setShowHistory(false)} operatorId={operatorId} />
     </>
   );
 }
@@ -589,19 +619,22 @@ function PositionStreamCard({
   intervalSeconds,
   onChange,
   configured,
+  operatorId,
 }: {
   editable: boolean;
   enabled: boolean;
   intervalSeconds: string;
   onChange: (patch: { streamEnabled?: boolean; streamIntervalSeconds?: string }) => void;
   configured: boolean;
+  operatorId: string | null;
 }) {
   const queryClient = useQueryClient();
   const [feedback, setFeedback] = useState<string | null>(null);
 
   const status = useQuery({
-    queryKey: ['track7-stream'],
-    queryFn: () => api<StreamStatus>('/integrations/track7/stream'),
+    queryKey: ['track7-stream', operatorId],
+    queryFn: () =>
+      api<StreamStatus>('/integrations/track7/stream', { query: { operatorId: operatorId ?? undefined } }),
     refetchInterval: 15_000,
   });
 
@@ -609,7 +642,7 @@ function PositionStreamCard({
     mutationFn: () =>
       api<{ collected: number; pages: number; durationMs: number }>('/integrations/track7/stream/collect', {
         method: 'POST',
-        body: {},
+        body: { operatorId: operatorId ?? undefined },
       }),
     onSuccess: (result) => {
       setFeedback(`${result.collected} posição(ões) em ${result.pages} página(s) · ${result.durationMs} ms`);
@@ -709,12 +742,21 @@ function PositionStreamCard({
   );
 }
 
-function DiagnosticsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function DiagnosticsModal({
+  open,
+  onClose,
+  operatorId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  operatorId: string | null;
+}) {
   const { data, isLoading, error, refetch, isFetching } = useQuery({
-    queryKey: ['track7-diagnostics'],
+    queryKey: ['track7-diagnostics', operatorId],
     queryFn: () =>
       api<{ checks: Array<{ name: string; status: 'ok' | 'warn' | 'error'; detail: string }> }>(
         '/integrations/track7/diagnostics',
+        { query: { operatorId: operatorId ?? undefined } },
       ),
     enabled: open,
   });
@@ -764,12 +806,21 @@ function DiagnosticsModal({ open, onClose }: { open: boolean; onClose: () => voi
   );
 }
 
-function GroupsModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function GroupsModal({
+  open,
+  onClose,
+  operatorId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  operatorId: string | null;
+}) {
   const { data, isLoading } = useQuery({
-    queryKey: ['track7-groups'],
+    queryKey: ['track7-groups', operatorId],
     queryFn: () =>
       api<{ groups: Array<{ group_id: number; name: string; level: number; group_type_name: string | null; is_organisation: boolean }> }>(
         '/integrations/track7/groups',
+        { query: { operatorId: operatorId ?? undefined } },
       ),
     enabled: open,
   });
@@ -809,9 +860,17 @@ function GroupsModal({ open, onClose }: { open: boolean; onClose: () => void }) 
   );
 }
 
-function SyncHistoryModal({ open, onClose }: { open: boolean; onClose: () => void }) {
+function SyncHistoryModal({
+  open,
+  onClose,
+  operatorId,
+}: {
+  open: boolean;
+  onClose: () => void;
+  operatorId: string | null;
+}) {
   const { data, isLoading } = useQuery({
-    queryKey: ['track7-sync-runs'],
+    queryKey: ['track7-sync-runs', operatorId],
     queryFn: () =>
       api<{
         runs: Array<{
@@ -824,8 +883,9 @@ function SyncHistoryModal({ open, onClose }: { open: boolean; onClose: () => voi
           stats: Record<string, number>;
           error: string | null;
           created_by_name: string | null;
+          operator_name: string | null;
         }>;
-      }>('/integrations/track7/sync-runs'),
+      }>('/integrations/track7/sync-runs', { query: { operatorId: operatorId ?? undefined } }),
     enabled: open,
     refetchInterval: open ? 5000 : false,
   });
@@ -847,6 +907,7 @@ function SyncHistoryModal({ open, onClose }: { open: boolean; onClose: () => voi
           <thead className="bg-slate-50">
             <tr>
               <Th>Início</Th>
+              <Th>Empresa</Th>
               <Th>Tipo</Th>
               <Th>Origem</Th>
               <Th>Status</Th>
@@ -858,6 +919,7 @@ function SyncHistoryModal({ open, onClose }: { open: boolean; onClose: () => voi
             {data.runs.map((run) => (
               <tr key={run.id}>
                 <Td>{formatDateTime(run.started_at)}</Td>
+                <Td>{run.operator_name ?? '—'}</Td>
                 <Td>{run.kind}</Td>
                 <Td>{run.trigger_source}{run.created_by_name ? ` · ${run.created_by_name}` : ''}</Td>
                 <Td>
