@@ -12,6 +12,10 @@ export interface Operator {
   status: 'ACTIVE' | 'INACTIVE';
   notes: string | null;
   createdAt: string;
+  /** MANUAL: cadastrada à mão · DESCOBERTA: criada a partir da API. */
+  source?: 'MANUAL' | 'DESCOBERTA';
+  /** false quando a organização sumiu da API — sinalização, não exclusão. */
+  apiVisible?: boolean;
   stats: {
     veiculos: number;
     credenciais: boolean;

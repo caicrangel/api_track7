@@ -4,6 +4,7 @@ import { decryptSecret, encryptSecret } from '../../lib/crypto.js';
 import { badRequest } from '../../lib/errors.js';
 import { Track7Client, TRACK7_REGIONS } from './track7-client.js';
 import { getOperatorById, type OperatorRow } from '../operators/operators-service.js';
+import { getIntegrationMode } from './integration-mode.js';
 
 export interface IntegrationCredentialRow {
   id: string;
@@ -78,12 +79,24 @@ export async function getSharedCredentialRow(
 }
 
 /**
- * Credencial efetiva de uma operadora: a própria tem precedência; na falta
- * dela, vale a credencial compartilhada da conta.
+ * Credencial efetiva de uma operadora, conforme o modo da conta:
+ *
+ *   CONSORCIO     → apenas o acesso único da conta. Credenciais individuais
+ *                   existentes são ignoradas (ficam guardadas para o caso de
+ *                   a conta voltar ao outro modo).
+ *   POR_OPERADORA → a própria tem precedência; na falta dela, vale a
+ *                   compartilhada, o que torna a migração entre modos suave.
  */
 export async function resolveCredential(
   operator: OperatorRow,
 ): Promise<{ row: IntegrationCredentialRow; shared: boolean } | null> {
+  const mode = await getIntegrationMode(operator.organization_id);
+
+  if (mode === 'CONSORCIO') {
+    const shared = await getSharedCredentialRow(operator.organization_id);
+    return shared?.client_id_enc ? { row: shared, shared: true } : null;
+  }
+
   const own = await getCredentialRow(operator.id);
   if (own?.client_id_enc) return { row: own, shared: false };
 

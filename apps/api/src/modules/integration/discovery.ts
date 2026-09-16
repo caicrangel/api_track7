@@ -23,6 +23,8 @@ export interface DiscoveryResult {
   organisations: DiscoveredOrganisation[];
   created: number;
   linked: number;
+  /** Operadoras que deixaram de aparecer na API — sinalizadas, nunca apagadas. */
+  missing: Array<{ operatorId: string; name: string }>;
 }
 
 /**
@@ -64,6 +66,7 @@ export async function discoverOperators(
   const byName = new Map(existing.map((o) => [normalize(o.name), o]));
 
   const organisations: DiscoveredOrganisation[] = [];
+  const seenOperatorIds = new Set<string>();
   let created = 0;
   let linked = 0;
 
@@ -73,6 +76,8 @@ export async function discoverOperators(
 
     const alreadyLinked = byOrganisation.get(groupId);
     if (alreadyLinked) {
+      seenOperatorIds.add(alreadyLinked.id);
+      if (options.apply) await markSeen(alreadyLinked.id);
       organisations.push({
         groupId,
         name,
@@ -86,11 +91,14 @@ export async function discoverOperators(
     // uma operadora cadastrada com o mesmo nome, ainda sem vínculo
     const sameName = byName.get(normalize(name));
     if (sameName && sameName.track7_organisation_id == null) {
+      seenOperatorIds.add(sameName.id);
       if (options.apply) {
-        await query(`UPDATE operators SET track7_organisation_id = $2, updated_at = now() WHERE id = $1`, [
-          sameName.id,
-          groupId,
-        ]);
+        await query(
+          `UPDATE operators
+              SET track7_organisation_id = $2, api_visible = true, api_last_seen_at = now(), updated_at = now()
+            WHERE id = $1`,
+          [sameName.id, groupId],
+        );
         byOrganisation.set(groupId, { ...sameName, track7_organisation_id: groupId });
         linked += 1;
       }
@@ -117,11 +125,14 @@ export async function discoverOperators(
 
     if (options.apply) {
       const inserted = await one<{ id: string }>(
-        `INSERT INTO operators (organization_id, name, short_name, track7_organisation_id)
-         VALUES ($1, $2, $2, $3) RETURNING id`,
+        `INSERT INTO operators
+           (organization_id, name, short_name, track7_organisation_id, source, api_visible, api_last_seen_at)
+         VALUES ($1, $2, $2, $3, 'DESCOBERTA', true, now())
+         RETURNING id`,
         [organizationId, name, groupId],
       );
       created += 1;
+      if (inserted) seenOperatorIds.add(inserted.id);
       organisations.push({
         groupId,
         name,
@@ -134,7 +145,27 @@ export async function discoverOperators(
     }
   }
 
-  return { organisations, created, linked };
+  // O que estava vinculado e não apareceu desta vez fica sinalizado.
+  // Apagar seria destruir histórico por uma indisponibilidade momentânea.
+  const missing = existing
+    .filter((o) => o.track7_organisation_id != null && !seenOperatorIds.has(o.id))
+    .map((o) => ({ operatorId: o.id, name: o.name }));
+
+  if (options.apply && missing.length) {
+    await query(
+      `UPDATE operators SET api_visible = false, updated_at = now() WHERE id = ANY($1::uuid[])`,
+      [missing.map((m) => m.operatorId)],
+    );
+  }
+
+  return { organisations, created, linked, missing };
+}
+
+async function markSeen(operatorId: string): Promise<void> {
+  await query(
+    `UPDATE operators SET api_visible = true, api_last_seen_at = now(), updated_at = now() WHERE id = $1`,
+    [operatorId],
+  );
 }
 
 function normalize(value: string): string {

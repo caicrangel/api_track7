@@ -10,6 +10,7 @@ import {
   Save,
   Search,
   Share2,
+  SlidersHorizontal,
   ScrollText,
   Stethoscope,
   XCircle,
@@ -301,7 +302,10 @@ function IntegrationTab() {
   const { data, isLoading } = useQuery({
     queryKey: ['integration-track7', operatorId],
     queryFn: () =>
-      api<{ integration: IntegrationView; regions: RegionPreset[] }>('/integrations/track7', { query: scope }),
+      api<{ mode: 'POR_OPERADORA' | 'CONSORCIO'; integration: IntegrationView; regions: RegionPreset[] }>(
+        '/integrations/track7',
+        { query: scope },
+      ),
     enabled: !needsOperator,
     refetchInterval: (query) =>
       (query.state.data as { integration: IntegrationView } | undefined)?.integration.lastSyncStatus === 'RUNNING'
@@ -391,6 +395,7 @@ function IntegrationTab() {
   if (needsOperator) {
     return (
       <>
+        <IntegrationModeCard />
         <SharedCredentialCard editable={editable} regions={DEFAULT_REGIONS} />
         <div className="mt-4">
           <Alert tone="info" title="Escolha uma empresa operadora">
@@ -404,9 +409,12 @@ function IntegrationTab() {
 
   if (isLoading || !data) return <Spinner />;
   const integration = data.integration;
+  const consortium = data.mode === 'CONSORCIO';
+  const canEditOwn = editable && !consortium;
 
   return (
     <>
+      <IntegrationModeCard />
       <SharedCredentialCard editable={editable} regions={data.regions} />
 
       <Card className="mt-4 p-5">
@@ -434,6 +442,15 @@ function IntegrationTab() {
             ? 'Esta operadora está sendo atendida pelo acesso único da conta. Preencha os campos abaixo apenas se ela tiver chaves próprias — elas passam a ter precedência.'
             : 'Sincroniza veículos, motoristas, posições, viagens e eventos da Track7. As credenciais são guardadas cifradas (AES-256-GCM) e nunca retornam para a tela — os campos aparecem vazios por segurança, preencha apenas para trocar.'}
         </p>
+
+        {consortium && (
+          <div className="mt-4">
+            <Alert tone="info" title="Credenciais gerenciadas pelo acesso da conta">
+              A conta está em modo consórcio, então esta empresa usa o acesso único e os campos abaixo ficam
+              desativados. Para cadastrar chaves próprias, desligue o modo no topo da página.
+            </Alert>
+          </div>
+        )}
 
         {!operatorId && operators.length > 1 && (
           <div className="mt-4">
@@ -510,7 +527,7 @@ function IntegrationTab() {
           <Field label="Usuário">
             <Input
               value={form.username}
-              disabled={!editable}
+              disabled={!canEditOwn}
               onChange={(e) => setForm({ ...form, username: e.target.value })}
               placeholder={integration.hasUsername ? '•••• (preencha para trocar)' : 'usuário do MiX Fleet Manager'}
               autoComplete="off"
@@ -520,7 +537,7 @@ function IntegrationTab() {
             <Input
               type="password"
               value={form.password}
-              disabled={!editable}
+              disabled={!canEditOwn}
               onChange={(e) => setForm({ ...form, password: e.target.value })}
               placeholder={integration.hasPassword ? '•••• (preencha para trocar)' : 'senha do MiX Fleet Manager'}
               autoComplete="new-password"
@@ -567,7 +584,13 @@ function IntegrationTab() {
         </div>
 
         <div className="mt-5 flex flex-wrap gap-2">
-          <Button variant="primary" icon={<Save className="h-4 w-4" />} loading={save.isPending} disabled={!editable} onClick={() => save.mutate()}>
+          <Button
+            variant="primary"
+            icon={<Save className="h-4 w-4" />}
+            loading={save.isPending}
+            disabled={!canEditOwn}
+            onClick={() => save.mutate()}
+          >
             Salvar
           </Button>
           <Button icon={<Plug className="h-4 w-4" />} loading={test.isPending} disabled={!editable} onClick={() => test.mutate()}>
@@ -632,6 +655,162 @@ function IntegrationTab() {
       />
       <GroupsModal open={showGroups} onClose={() => setShowGroups(false)} operatorId={operatorId} />
       <SyncHistoryModal open={showHistory} onClose={() => setShowHistory(false)} operatorId={operatorId} />
+    </>
+  );
+}
+
+interface IntegrationModeState {
+  mode: 'POR_OPERADORA' | 'CONSORCIO';
+  changedAt: string | null;
+  changedByName: string | null;
+  canEnableConsortium: boolean;
+  blockers: string[];
+  sharedConfigured: boolean;
+  operatorsWithOwnCredentials: number;
+}
+
+/**
+ * Interruptor no nível da conta. No modo consórcio o sistema para de pedir
+ * credencial empresa por empresa e passa a derivar tudo de um acesso só.
+ */
+function IntegrationModeCard() {
+  const { can } = useAuth();
+  const { refresh } = useOperator();
+  const queryClient = useQueryClient();
+  const [confirming, setConfirming] = useState<'POR_OPERADORA' | 'CONSORCIO' | null>(null);
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['integration-mode'],
+    queryFn: () => api<IntegrationModeState>('/integrations/track7/mode'),
+  });
+
+  const change = useMutation({
+    mutationFn: (mode: 'POR_OPERADORA' | 'CONSORCIO') =>
+      api<{ mode: string; organisationsVisible: number | null }>('/integrations/track7/mode', {
+        method: 'PUT',
+        body: { mode },
+      }),
+    onSuccess: (result) => {
+      setFeedback({
+        tone: 'success',
+        message:
+          result.mode === 'CONSORCIO'
+            ? `Modo consórcio ligado. O acesso da conta enxerga ${result.organisationsVisible} organização(ões).`
+            : 'Modo voltou para credenciais por operadora.',
+      });
+      setConfirming(null);
+      void queryClient.invalidateQueries({ queryKey: ['integration-mode'] });
+      void queryClient.invalidateQueries({ queryKey: ['integration-track7'] });
+      refresh();
+    },
+    onError: (err: Error) => {
+      setFeedback({ tone: 'danger', message: err.message });
+      setConfirming(null);
+    },
+  });
+
+  if (isLoading || !data) return null;
+  const consortium = data.mode === 'CONSORCIO';
+
+  return (
+    <>
+      <Card className="mb-4 p-5">
+        <div className="flex flex-wrap items-center gap-3">
+          <SlidersHorizontal className="h-5 w-5 text-brand-600" />
+          <h2 className="text-base font-semibold text-slate-900">Modo de integração</h2>
+          <Badge tone={consortium ? 'info' : 'neutral'}>
+            {consortium ? 'Consórcio · acesso único' : 'Por operadora'}
+          </Badge>
+        </div>
+
+        <p className="mt-2 max-w-4xl text-sm text-slate-500">
+          {consortium
+            ? 'A conta usa um único acesso da Track7. As empresas são derivadas das organizações que esse acesso enxerga, e as credenciais individuais ficam desativadas.'
+            : 'Cada empresa cadastra as próprias credenciais da Track7. Ligue o modo consórcio se a Track7 emitir um acesso único que enxergue todas as empresas.'}
+        </p>
+
+        {feedback && (
+          <div className="mt-4">
+            <Alert tone={feedback.tone}>{feedback.message}</Alert>
+          </div>
+        )}
+
+        {!consortium && data.blockers.length > 0 && (
+          <div className="mt-4">
+            <Alert tone="info" title="Para ligar o modo consórcio">
+              <ul className="list-disc space-y-1 pl-5">
+                {data.blockers.map((b) => (
+                  <li key={b}>{b}</li>
+                ))}
+              </ul>
+            </Alert>
+          </div>
+        )}
+
+        <div className="mt-5 flex flex-wrap items-center gap-4">
+          {can('ADMIN') ? (
+            <Toggle
+              checked={consortium}
+              disabled={!consortium && !data.canEnableConsortium}
+              onChange={(value) => setConfirming(value ? 'CONSORCIO' : 'POR_OPERADORA')}
+              label="Usar um acesso único para todas as empresas"
+            />
+          ) : (
+            <p className="text-sm text-slate-500">Somente administradores podem alterar o modo.</p>
+          )}
+          {data.changedAt && (
+            <span className="text-xs text-slate-400">
+              Alterado em {formatDateTime(data.changedAt)}
+              {data.changedByName ? ` por ${data.changedByName}` : ''}
+            </span>
+          )}
+        </div>
+      </Card>
+
+      <Modal
+        open={confirming !== null}
+        onClose={() => setConfirming(null)}
+        title={confirming === 'CONSORCIO' ? 'Ligar o modo consórcio?' : 'Voltar para credenciais por operadora?'}
+        footer={
+          <>
+            <Button onClick={() => setConfirming(null)}>Cancelar</Button>
+            <Button
+              variant="primary"
+              loading={change.isPending}
+              onClick={() => confirming && change.mutate(confirming)}
+            >
+              Confirmar
+            </Button>
+          </>
+        }
+      >
+        {confirming === 'CONSORCIO' ? (
+          <div className="space-y-3 text-sm text-slate-600">
+            <p>A partir de agora todas as empresas passam a usar o acesso único da conta.</p>
+            <ul className="list-disc space-y-1 pl-5">
+              <li>O sistema deixa de pedir credenciais empresa por empresa.</li>
+              <li>A lista de empresas passa a ser mantida pela API automaticamente.</li>
+              {data.operatorsWithOwnCredentials > 0 && (
+                <li>
+                  <strong>{data.operatorsWithOwnCredentials}</strong> operadora(s) têm chaves próprias — elas
+                  ficam <strong>guardadas mas ignoradas</strong>, e voltam a valer se você desligar o modo.
+                </li>
+              )}
+            </ul>
+            <p className="text-xs text-slate-500">
+              A troca só é aceita se o acesso da conta realmente autenticar na Track7.
+            </p>
+          </div>
+        ) : (
+          <div className="space-y-3 text-sm text-slate-600">
+            <p>Cada empresa volta a depender das próprias credenciais.</p>
+            <Alert tone="warning">
+              Operadoras sem chaves próprias vão parar de sincronizar até que alguém as cadastre.
+            </Alert>
+          </div>
+        )}
+      </Modal>
     </>
   );
 }

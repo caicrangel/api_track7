@@ -12,6 +12,8 @@ import { ensurePartitions } from './db/migrate.js';
 import { closeRedis } from './lib/cache.js';
 import { runSync } from './modules/integration/sync-service.js';
 import { collectPositions } from './modules/integration/position-stream.js';
+import { discoverOperators } from './modules/integration/discovery.js';
+import { query } from './db/pool.js';
 
 interface ScheduleRow {
   organization_id: string;
@@ -190,6 +192,46 @@ function applyStreamCollector(schedule: ScheduleRow, index: number, total: numbe
   );
 }
 
+/**
+ * No modo consórcio a lista de empresas é derivada da API: uma nova operadora
+ * que apareça na Track7 precisa entrar sozinha. Roda por conta, respeitando o
+ * intervalo configurado, e nunca apaga nada — só cria e sinaliza.
+ */
+async function reconcileOperators(): Promise<void> {
+  const pending = await rows<{ organization_id: string; interval_minutes: number }>(
+    `SELECT c.organization_id, c.discovery_interval_minutes AS interval_minutes
+       FROM integration_credentials c
+       JOIN organizations o ON o.id = c.organization_id
+      WHERE c.provider = 'track7'
+        AND c.operator_id IS NULL
+        AND c.client_id_enc IS NOT NULL
+        AND c.discovery_enabled
+        AND o.integration_mode = 'CONSORCIO'
+        AND (c.last_discovery_at IS NULL
+             OR c.last_discovery_at < now() - (c.discovery_interval_minutes || ' minutes')::interval)`,
+  );
+
+  for (const item of pending) {
+    try {
+      const result = await discoverOperators(item.organization_id, { apply: true });
+      if (result.created || result.linked || result.missing.length) {
+        log(
+          `reconciliação: ${result.created} criada(s), ${result.linked} vinculada(s), ` +
+            `${result.missing.length} sem aparecer na API`,
+        );
+      }
+    } catch (err) {
+      log(`falha na reconciliação de operadoras: ${(err as Error).message}`);
+    } finally {
+      await query(
+        `UPDATE integration_credentials SET last_discovery_at = now()
+          WHERE organization_id = $1 AND operator_id IS NULL AND provider = 'track7'`,
+        [item.organization_id],
+      ).catch(() => {});
+    }
+  }
+}
+
 async function main(): Promise<void> {
   await waitForDatabase();
   log('worker iniciado');
@@ -197,6 +239,9 @@ async function main(): Promise<void> {
   await refreshSchedules();
   // relê a configuração a cada minuto — mudanças na UI entram em vigor sozinhas
   cron.schedule('* * * * *', () => void refreshSchedules().catch((err) => log('erro ao reler agendamentos', err)));
+  // mantém a lista de empresas em dia com a API (apenas no modo consórcio)
+  await reconcileOperators().catch((err) => log('erro na reconciliação inicial', err));
+  cron.schedule('*/5 * * * *', () => void reconcileOperators().catch((err) => log('erro na reconciliação', err)));
   // manutenção diária das partições
   cron.schedule('0 3 * * *', () => void ensurePartitions().catch((err) => log('erro ao criar partições', err)), {
     timezone: env.TZ,

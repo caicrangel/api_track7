@@ -15,6 +15,11 @@ import {
 } from './credentials.js';
 import { listSyncRuns, runSync } from './sync-service.js';
 import { discoverOperators } from './discovery.js';
+import {
+  assertPerOperatorCredentialsAllowed,
+  getIntegrationModeState,
+  setIntegrationMode,
+} from './integration-mode.js';
 import { backfillPositions, collectPositions, getCursor, seedCursor } from './position-stream.js';
 import { TRACK7_REGIONS } from './track7-client.js';
 import { resolveOperator } from '../operators/operators-service.js';
@@ -29,7 +34,9 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const { operatorId } = operatorQuerySchema.parse(request.query);
     const operator = await resolveOperator(me.orgId, operatorId);
     const effective = await resolveCredential(operator);
+    const modeState = await getIntegrationModeState(me.orgId);
     return {
+      mode: modeState.mode,
       operator: {
         id: operator.id,
         name: operator.name,
@@ -47,6 +54,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       .object({ operatorId: z.string().uuid().optional() })
       .passthrough()
       .parse(request.body ?? {});
+    await assertPerOperatorCredentialsAllowed(me.orgId);
     const operator = await resolveOperator(me.orgId, operatorId as string | undefined);
     const input = credentialsInputSchema.parse(body);
     const saved = await saveCredentials(me.orgId, operator.id, input);
@@ -99,6 +107,35 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  /** Modo de integração da conta e os pré-requisitos para trocá-lo. */
+  app.get('/track7/mode', { preHandler: authenticate }, async (request) => {
+    const me = currentUser(request);
+    return getIntegrationModeState(me.orgId);
+  });
+
+  /**
+   * Troca o modo. Ligar o consórcio só passa se o acesso da conta realmente
+   * autenticar na Track7 — credencial preenchida não é credencial que funciona.
+   */
+  app.put('/track7/mode', { preHandler: requireRole('ADMIN') }, async (request) => {
+    const me = currentUser(request);
+    const { mode } = z
+      .object({ mode: z.enum(['POR_OPERADORA', 'CONSORCIO']) })
+      .parse(request.body ?? {});
+
+    const result = await setIntegrationMode(me.orgId, mode, me.sub);
+    await recordAudit({
+      organizationId: me.orgId,
+      userId: me.sub,
+      action: 'integration.track7.mode',
+      entity: 'organization',
+      entityId: me.orgId,
+      metadata: { mode, organisationsVisible: result.organisationsVisible },
+      ip: request.ip,
+    });
+    return { ...result, state: await getIntegrationModeState(me.orgId) };
+  });
+
   /**
    * Credencial compartilhada da conta — um único acesso que atende todas as
    * operadoras que não tiverem chaves próprias.
@@ -124,7 +161,15 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
       metadata: { region: saved.region, apiUrl: saved.api_url },
       ip: request.ip,
     });
-    return { integration: toPublicView(saved, true) };
+
+    // No modo consórcio a lista de empresas vem da API: já reconcilia.
+    const state = await getIntegrationModeState(me.orgId);
+    let discovery = null;
+    if (state.mode === 'CONSORCIO') {
+      discovery = await discoverOperators(me.orgId, { apply: true }).catch(() => null);
+    }
+
+    return { integration: toPublicView(saved, true), discovery };
   });
 
   /**

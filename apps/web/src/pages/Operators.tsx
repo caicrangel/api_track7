@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { Building2, CheckCircle2, Pencil, Plus, Trash2, XCircle } from 'lucide-react';
+import { AlertTriangle, Building2, CheckCircle2, Pencil, Plus, Trash2, XCircle } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 import { useAuth } from '../lib/auth';
@@ -104,10 +104,18 @@ export function OperatorsPage() {
               {operators.map((op) => (
                 <tr key={op.id} className="hover:bg-slate-50/70">
                   <Td>
-                    <p className="font-medium text-slate-800">{op.name}</p>
-                    {op.shortName && op.shortName !== op.name && (
-                      <p className="text-xs text-slate-400">{op.shortName}</p>
-                    )}
+                    <div className="flex items-center gap-2">
+                      <p className="font-medium text-slate-800">{op.name}</p>
+                      {op.apiVisible === false && (
+                        <span title="Não aparece mais na API da Track7">
+                          <AlertTriangle className="h-4 w-4 text-amber-500" />
+                        </span>
+                      )}
+                    </div>
+                    <p className="text-xs text-slate-400">
+                      {op.shortName && op.shortName !== op.name ? `${op.shortName} · ` : ''}
+                      {op.source === 'DESCOBERTA' ? 'descoberta pela API' : 'cadastro manual'}
+                    </p>
                   </Td>
                   <Td className="font-mono text-xs">{op.code ?? '—'}</Td>
                   <Td>{op.document ?? '—'}</Td>

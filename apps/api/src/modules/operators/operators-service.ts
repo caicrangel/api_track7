@@ -16,6 +16,9 @@ export interface OperatorRow {
   /** Identidade da empresa na plataforma da Track7. */
   track7_organisation_id: number | null;
   track7_group_ids: number[];
+  source: 'MANUAL' | 'DESCOBERTA';
+  api_visible: boolean;
+  api_last_seen_at: Date | null;
   short_name: string | null;
   code: string | null;
   document: string | null;

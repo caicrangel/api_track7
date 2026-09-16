@@ -8,19 +8,47 @@ A Track7 opera sobre a plataforma **MiX Telematics** (hoje apresentada como
 
 Implementação: `apps/api/src/modules/integration/track7-client.ts`.
 
-## 0. Dois modos de credencial
+## 0. Modo de integração (configuração da conta)
 
 Na plataforma da Track7 um mesmo login pode enxergar **várias organizações** —
-`api/organisationgroups` devolve uma lista. O sistema suporta os dois arranjos:
+`api/organisationgroups` devolve uma lista. A conta escolhe como opera, em
+**Configurações › Integrações › Modo de integração**:
 
 | Modo | Quando usar | Como fica |
 |------|-------------|-----------|
-| **Por operadora** | cada empresa tem o próprio contrato e as próprias chaves | uma credencial em cada operadora |
-| **Compartilhado** | a Track7 emite um acesso único do consórcio | uma credencial na conta, válida para todas |
+| **POR_OPERADORA** *(padrão)* | cada empresa tem o próprio contrato e as próprias chaves | uma credencial em cada operadora |
+| **CONSORCIO** | a Track7 emite um acesso único que enxerga todas | uma credencial na conta; as empresas vêm da API |
 
-Os dois convivem: a credencial **própria da operadora tem precedência**; na falta
-dela, vale a credencial compartilhada da conta. Dá para migrar de um modo para o
-outro sem perder dado — basta cadastrar (ou apagar) as chaves da operadora.
+No modo **CONSORCIO** o sistema deixa de pedir credencial empresa por empresa:
+a lista de operadoras é derivada das organizações visíveis, e as credenciais
+individuais ficam **guardadas mas ignoradas** — desligar o modo as reativa.
+
+No modo **POR_OPERADORA** a credencial própria tem precedência e a compartilhada
+funciona como reserva, o que torna a transição entre os modos suave.
+
+### Travas da troca de modo
+
+| Trava | Porquê |
+|-------|--------|
+| Só perfil **ADMIN** altera | é uma decisão estrutural da conta |
+| Ligar o consórcio exige **autenticação real** na Track7 | credencial preenchida não é credencial que funciona |
+| O acesso precisa enxergar ao menos uma organização | senão não há de onde derivar as empresas |
+| `PUT /integrations/track7` é **bloqueado** no modo consórcio | evita dúvida sobre qual credencial vale |
+| Quem trocou e quando fica registrado | em `organizations` e na trilha de auditoria |
+| Nenhuma credencial é apagada na troca | voltar atrás precisa ser possível |
+
+### Reconciliação automática
+
+No modo consórcio o worker mantém a lista de empresas em dia com a API
+(intervalo padrão: 60 minutos, em `discovery_interval_minutes`):
+
+- organização nova na API → **operadora criada** com `source = DESCOBERTA`;
+- organização que reaparece → `api_visible = true`, `api_last_seen_at` atualizado;
+- organização que some → `api_visible = false`, **sem apagar nada**.
+
+A última regra é deliberada: uma indisponibilidade momentânea da API não pode
+destruir histórico de GPS. A empresa fica sinalizada na tela de Operadoras e a
+decisão de removê-la é sempre humana.
 
 O identificador da organização na Track7 (`track7_organisation_id`) é atributo da
 **operadora**, não da credencial. É isso que permite um acesso só atender 33

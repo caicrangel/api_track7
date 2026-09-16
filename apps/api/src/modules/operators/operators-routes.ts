@@ -59,6 +59,9 @@ export async function operatorsRoutes(app: FastifyInstance): Promise<void> {
         status: op.status,
         notes: op.notes,
         createdAt: op.created_at,
+        source: op.source,
+        apiVisible: op.api_visible,
+        track7OrganisationId: op.track7_organisation_id,
         stats: byId.get(op.id) ?? null,
       })),
     };
