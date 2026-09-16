@@ -16,6 +16,8 @@ const createSchema = z.object({
 
 const updateSchema = createSchema.partial().extend({
   status: z.enum(['ACTIVE', 'INACTIVE']).optional(),
+  /** Campo da Track7 que representa o número de ordem do veículo. */
+  vehicleOrderField: z.enum(['fleet_number', 'description', 'registration_number']).optional(),
 });
 
 export async function operatorsRoutes(app: FastifyInstance): Promise<void> {
@@ -61,6 +63,7 @@ export async function operatorsRoutes(app: FastifyInstance): Promise<void> {
         createdAt: op.created_at,
         source: op.source,
         apiVisible: op.api_visible,
+        vehicleOrderField: op.vehicle_order_field,
         track7OrganisationId: op.track7_organisation_id,
         stats: byId.get(op.id) ?? null,
       })),
@@ -120,9 +123,11 @@ export async function operatorsRoutes(app: FastifyInstance): Promise<void> {
          document = coalesce($6, document),
          notes = coalesce($7, notes),
          status = coalesce($8, status),
+         vehicle_order_field = coalesce($9, vehicle_order_field),
          updated_at = now()
        WHERE id = $1 AND organization_id = $2
-       RETURNING id, name, short_name, code, document, provider, status, notes, created_at`,
+       RETURNING id, name, short_name, code, document, provider, status, notes,
+                 vehicle_order_field, created_at`,
       [
         id,
         me.orgId,
@@ -132,6 +137,7 @@ export async function operatorsRoutes(app: FastifyInstance): Promise<void> {
         body.document ?? null,
         body.notes ?? null,
         body.status ?? null,
+        body.vehicleOrderField ?? null,
       ],
     );
 

@@ -8,6 +8,7 @@ import {
   ChevronDown,
   CircleUser,
   FileBarChart,
+  FileCheck2,
   LayoutDashboard,
   LogOut,
   Menu,
@@ -33,6 +34,7 @@ const OPERATION_ITEMS: NavItem[] = [
   { to: '/', label: 'Dashboard', icon: <LayoutDashboard className="h-[18px] w-[18px]" /> },
   { to: '/veiculos', label: 'Veículos', icon: <Truck className="h-[18px] w-[18px]" /> },
   { to: '/motoristas', label: 'Motoristas', icon: <UsersRound className="h-[18px] w-[18px]" /> },
+  { to: '/contestacoes', label: 'Contestações', icon: <FileCheck2 className="h-[18px] w-[18px]" /> },
   { to: '/relatorios', label: 'Relatórios', icon: <FileBarChart className="h-[18px] w-[18px]" /> },
 ];
 

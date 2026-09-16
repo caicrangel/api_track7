@@ -316,19 +316,44 @@ export function Modal({
 }
 
 // ─── Tabela ──────────────────────────────────────────────
-export function Table({ children, className }: { children: ReactNode; className?: string }) {
+export function Table({
+  children,
+  className,
+  fixed = false,
+}: {
+  children: ReactNode;
+  className?: string;
+  /** Larguras fixas por coluna — necessário para o texto quebrar em vez de transbordar. */
+  fixed?: boolean;
+}) {
   return (
     <div className={clsx('overflow-x-auto', className)}>
-      <table className="min-w-full divide-y divide-slate-200 text-sm">{children}</table>
+      <table
+        className={clsx(
+          'divide-y divide-slate-200 text-sm',
+          fixed ? 'w-full table-fixed' : 'min-w-full',
+        )}
+      >
+        {children}
+      </table>
     </div>
   );
 }
 
-export function Th({ children, className }: { children?: ReactNode; className?: string }) {
+export function Th({
+  children,
+  className,
+  wrap = false,
+}: {
+  children?: ReactNode;
+  className?: string;
+  wrap?: boolean;
+}) {
   return (
     <th
       className={clsx(
-        'whitespace-nowrap px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500',
+        'px-4 py-3 text-left text-xs font-semibold uppercase tracking-wide text-slate-500',
+        !wrap && 'whitespace-nowrap',
         className,
       )}
     >
@@ -337,8 +362,30 @@ export function Th({ children, className }: { children?: ReactNode; className?: 
   );
 }
 
-export function Td({ children, className }: { children?: ReactNode; className?: string }) {
-  return <td className={clsx('whitespace-nowrap px-4 py-3 text-slate-700', className)}>{children}</td>;
+export function Td({
+  children,
+  className,
+  title,
+  wrap = false,
+}: {
+  children?: ReactNode;
+  className?: string;
+  title?: string;
+  /**
+   * Permite quebra de linha. Precisa ser prop, e não classe: `whitespace-normal`
+   * e `whitespace-nowrap` têm a mesma especificidade, e quem vence é a ordem no
+   * CSS gerado — não a ordem no atributo class.
+   */
+  wrap?: boolean;
+}) {
+  return (
+    <td
+      title={title}
+      className={clsx('px-4 py-3 text-slate-700', !wrap && 'whitespace-nowrap', className)}
+    >
+      {children}
+    </td>
+  );
 }
 
 // ─── Paginação ───────────────────────────────────────────

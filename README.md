@@ -116,6 +116,14 @@ tela monta formulário e tabela sozinha. Já acompanham:
 `apps/api/src/modules/reports/report-catalog.ts` — nenhum código de front-end é
 necessário. Veja `docs/RELATORIOS.md`.
 
+### Contestações
+Módulo dedicado ao **relatório georreferenciado de viagem** exigido pelo Ofício
+DGOD/TRANSFACIL nº 001/2026 (SMMUR/SUMOB de Belo Horizonte): número de ordem, data,
+hora, latitude e longitude, um arquivo por viagem contestada, em XLSX ou CSV, nomeado
+com o ID da planilha de apuração. Cada emissão fica registrada com o SHA-256 do
+conteúdo — evidência de que não houve alteração manual.
+Veja [`docs/RELATORIO-SUMOB.md`](docs/RELATORIO-SUMOB.md).
+
 ### Global
 **Configurações** (organização, integrações, auditoria), **Usuários** (CRUD com quatro
 perfis de acesso), **Ajuda** e **Perfil**.
@@ -198,4 +206,5 @@ Variáveis mínimas para a API: `DATABASE_URL`, `JWT_SECRET`, `APP_ENCRYPTION_KE
 - [`docs/ARQUITETURA.md`](docs/ARQUITETURA.md) — decisões técnicas e modelo de dados
 - [`docs/INTEGRACAO-TRACK7.md`](docs/INTEGRACAO-TRACK7.md) — endpoints, autenticação e mapeamento de campos
 - [`docs/RELATORIOS.md`](docs/RELATORIOS.md) — como criar um relatório novo
+- [`docs/RELATORIO-SUMOB.md`](docs/RELATORIO-SUMOB.md) — modelo canônico para contestações
 - [`docs/API.md`](docs/API.md) — referência dos endpoints HTTP

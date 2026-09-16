@@ -1483,7 +1483,7 @@ function SyncHistoryModal({
                   </Badge>
                 </Td>
                 <Td>{run.duration_ms ? `${formatNumber(run.duration_ms / 1000, 1)}s` : '—'}</Td>
-                <Td className="max-w-[320px] whitespace-normal text-xs text-slate-500">
+                <Td wrap className="max-w-[320px] text-xs text-slate-500">
                   {run.error
                     ? run.error
                     : Object.entries(run.stats ?? {})

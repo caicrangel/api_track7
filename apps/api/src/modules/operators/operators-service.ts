@@ -19,6 +19,8 @@ export interface OperatorRow {
   source: 'MANUAL' | 'DESCOBERTA';
   api_visible: boolean;
   api_last_seen_at: Date | null;
+  /** De qual campo da Track7 sai o "número de ordem" exigido pelo órgão gestor. */
+  vehicle_order_field: 'fleet_number' | 'description' | 'registration_number';
   short_name: string | null;
   code: string | null;
   document: string | null;

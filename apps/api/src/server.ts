@@ -17,6 +17,7 @@ import { integrationRoutes } from './modules/integration/integration-routes.js';
 import { vehiclesRoutes } from './modules/vehicles/vehicles-routes.js';
 import { driversRoutes } from './modules/drivers/drivers-routes.js';
 import { reportsRoutes } from './modules/reports/reports-routes.js';
+import { sumobRoutes } from './modules/reports/sumob-routes.js';
 import { dashboardRoutes } from './modules/dashboard/dashboard-routes.js';
 
 export async function buildServer() {
@@ -84,6 +85,7 @@ export async function buildServer() {
   await app.register(vehiclesRoutes, { prefix: '/api/vehicles' });
   await app.register(driversRoutes, { prefix: '/api/drivers' });
   await app.register(reportsRoutes, { prefix: '/api/reports' });
+  await app.register(sumobRoutes, { prefix: '/api/reports/sumob' });
   await app.register(dashboardRoutes, { prefix: '/api/dashboard' });
 
   return app;

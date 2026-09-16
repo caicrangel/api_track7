@@ -11,6 +11,7 @@ import { DashboardPage } from './pages/Dashboard';
 import { VehiclesPage } from './pages/Vehicles';
 import { DriversPage } from './pages/Drivers';
 import { ReportsPage } from './pages/Reports';
+import { ContestacoesPage } from './pages/Contestacoes';
 import { SettingsPage } from './pages/Settings';
 import { UsersPage } from './pages/Users';
 import { HelpPage } from './pages/Help';
@@ -65,6 +66,7 @@ createRoot(document.getElementById('root')!).render(
               <Route path="veiculos" element={<VehiclesPage />} />
               <Route path="motoristas" element={<DriversPage />} />
               <Route path="relatorios" element={<ReportsPage />} />
+              <Route path="contestacoes" element={<ContestacoesPage />} />
               <Route path="configuracoes" element={<SettingsPage />} />
               <Route path="operadoras" element={<OperatorsPage />} />
               <Route path="usuarios" element={<UsersPage />} />
