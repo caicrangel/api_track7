@@ -1,0 +1,126 @@
+name: fleetgov
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: fleetgov-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fleetgov}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fleetgov}
+      POSTGRES_DB: ${POSTGRES_DB:-fleetgov}
+      TZ: ${TZ:-America/Sao_Paulo}
+      PGTZ: UTC
+    command:
+      - postgres
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - maintenance_work_mem=256MB
+      - -c
+      - random_page_cost=1.1
+      - -c
+      - effective_io_concurrency=200
+      - -c
+      - wal_compression=on
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - max_wal_size=2GB
+      - -c
+      - track_io_timing=on
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fleetgov} -d ${POSTGRES_DB:-fleetgov}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    networks: [fleetgov]
+
+  redis:
+    image: redis:7-alpine
+    container_name: fleetgov-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory", "256mb", "--maxmemory-policy", "allkeys-lru"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    networks: [fleetgov]
+
+  api:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: fleetgov-api
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      PORT: 3333
+      ROLE: api
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    ports:
+      - "${API_PORT:-3333}:3333"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3333/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    networks: [fleetgov]
+
+  worker:
+    build:
+      context: ./apps/api
+      dockerfile: Dockerfile
+    container_name: fleetgov-worker
+    restart: unless-stopped
+    env_file: [.env]
+    environment:
+      NODE_ENV: production
+      ROLE: worker
+    command: ["node", "dist/worker.js"]
+    depends_on:
+      api: {condition: service_healthy}
+    networks: [fleetgov]
+
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api
+    container_name: fleetgov-web
+    restart: unless-stopped
+    depends_on:
+      api: {condition: service_started}
+    ports:
+      - "${WEB_PORT:-8080}:80"
+    networks: [fleetgov]
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  fleetgov:
+    driver: bridge
