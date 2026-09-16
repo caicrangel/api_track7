@@ -1,9 +1,10 @@
 # Integração com a API oficial da Track7 (MiX Integrate)
 
-A Track7 opera sobre a plataforma **MiX Telematics**. A integração usa a API pública
-**MiX Integrate**, cujas rotas foram conferidas contra a biblioteca cliente oficial
-[`MiXTelematics/MiX.Integrate.Api.Client`](https://github.com/MiXTelematics/MiX.Integrate.Api.Client)
-(arquivo `MiX.Integrate.Shared/Constants/APIControllerRoutes.cs`).
+A Track7 opera sobre a plataforma **MiX Telematics** (hoje apresentada como
+**Unity · On-Road IoT**, da Powerfleet). A integração usa a API pública
+**MiX Integrate**, e o contrato foi conferido campo a campo contra o
+**Swagger oficial** publicado em `https://integrate.us.mixtelematics.com`
+(`MiX.Integrate.Api` v1 — 185 rotas, 156 definições).
 
 Implementação: `apps/api/src/modules/integration/track7-client.ts`.
 
@@ -50,13 +51,27 @@ As URLs são editáveis na tela de integrações caso a Track7 informe um endpoi
 | Últimas posições por grupo | `POST api/positions/groups/latest/{quantity}` · body `[groupIds]` |
 | Posições por período | `POST api/positions/assets/from/{from}/to/{to}` · body `[assetIds]` |
 | Viagens por período | `POST api/trips/assets/from/{from}/to/{to}` · body `[assetIds]` |
-| Eventos por período | `POST api/events/assets/from/{from}/to/{to}` · body `[assetIds]` |
+| Eventos por período | `POST api/events/assets/from/{from}/to/{to}` · body **`EventFilter`** |
+| Biblioteca de tipos de evento | `GET api/libraryevents/organisation/{organisationId}` |
 
 **Formato de data nos segmentos de URL:** `yyyyMMddHHmmss` em **UTC**
 (constante `DataFormats.DateTime_Format` da biblioteca oficial).
 
 **Datas nas respostas** vêm sem fuso e são tratadas como UTC antes de gravar em
 `timestamptz`.
+
+**Corpo de `api/events/*`:** diferente das demais rotas, eventos **não** aceitam uma
+lista simples de IDs. O corpo é um objeto `EventFilter`:
+
+```json
+{ "EntityIds": [9001, 9002], "EventTypeIds": [], "MenuId": "" }
+```
+
+`EventTypeIds` vazio significa "todos os tipos"; preenchido, filtra por tipo de evento.
+
+**Limite de 7 dias por consulta:** posições, viagens e eventos aceitam no máximo uma
+janela de 7 dias por chamada. `splitWindows()` fatia períodos maiores automaticamente —
+uma sincronização de 30 dias vira 5 chamadas sequenciais por lote de veículos.
 
 **Lotes:** consultas por ativo são enviadas em blocos de 50 IDs.
 
@@ -94,16 +109,37 @@ excluídos — o histórico é preservado.
 `Longitude`, `SpeedKilometresPerHour`, `SpeedLimit`, `AltitudeMetres`, `Heading`,
 `OdometerKilometres`, `FormattedAddress`, `Source`.
 
+> `Source` é **texto** no contrato (ex.: `"GPS"`), não um código numérico.
+
+A consulta de últimas posições envia `ensureReverseGeocoded=true`, para que a API
+devolva o endereço já resolvido em `FormattedAddress`.
+
 ### Trip → `trips`
 `TripId`, `AssetId`, `DriverId`, `TripStart`/`TripEnd`, `FirstDepart`/`LastHalt`,
 `DrivingTime`, `StandingTime`, `Duration`, `DistanceKilometers`, odômetros,
 `MaxSpeedKilometersPerHour`, acelerações, `MaxRpm`, `FuelUsedLitres` e as posições de
 início/fim (lat/lon/endereço).
 
+> `Classification` é um **objeto** `{ Classification, Comment }`, com os valores
+> `None` · `Business` · `Private`. A coluna `classification` guarda o primeiro campo.
+
 ### Event → `telemetry_events`
-`EventId`, `AssetId`, `DriverId`, `EventTypeId`, `EventCategory`, `Description`,
+`EventId`, `AssetId`, `DriverId`, `EventTypeId`, `EventCategory`,
 `StartDateTime`/`EndDateTime`, `Value`/`ValueType`/`ValueUnits`, `SpeedLimit`,
 `TotalTimeSeconds`, `TotalOccurances` e a posição inicial.
+
+> O evento **não** traz descrição. O nome legível vem de
+> `api/libraryevents/organisation/{id}`, sincronizado na tabela `t7_event_types` e
+> gravado em `telemetry_events.event_description` durante o upsert.
+
+### LibraryEvent → `t7_event_types`
+`EventTypeId`, `Description`, `EventType`, `DisplayUnits`, `FormatType`, `ValueName`.
+
+### Group / GroupSummary → `t7_groups`
+`GroupId`, `Name`, `Type`, `DisplayTimeZone` e `SubGroups` (recursivo).
+
+> `Type` é um **enum em texto** (`OrganisationGroup`, `OrganisationSubGroup`,
+> `SiteGroup`, `DefaultSite`, …) — guardado em `group_type_name` e traduzido na tela.
 
 ## 4. Fluxo da sincronização
 
@@ -114,14 +150,38 @@ início/fim (lat/lon/endereço).
 3. **veiculos** — `api/assets/group/{id}` para cada grupo alvo; upsert em lote.
 4. **motoristas** — `api/drivers/organisation/{id}`.
 5. **posicoes_atuais** — últimas posições por grupo; atualiza `vehicle_last_position`.
-6. **viagens** e **eventos** — período desde a última sincronização (limitado por `history_days`).
+6. **tipos_evento** — `api/libraryevents/organisation/{id}`.
+7. **viagens** e **eventos** — período desde a última sincronização (limitado por
+   `history_days`), fatiado em janelas de 7 dias.
 
 Cada execução grava um registro em `sync_runs` com status, duração, contadores por etapa
 e erro — visível em **Configurações › Integrações › Histórico**.
 
 Um *lock* no Redis (`sync:{organizationId}`) impede duas sincronizações simultâneas.
 
-## 5. Teste e diagnóstico
+## 5. Endpoints ainda não usados (disponíveis para o órgão gestor)
+
+O Swagger expõe 185 rotas. Além das que já sincronizamos, estas são as candidatas mais
+prováveis para atender exigências específicas:
+
+| Necessidade | Rota |
+|-------------|------|
+| Consumo e abastecimento | `GET api/fueltransactions/organisation/{id}/from/{from}/to/{to}` |
+| Jornada do motorista (HOS) | `POST api/ghos/events/from/{from}/to/{to}` · `POST api/ghos/violations/drivers/from/{from}/to/{to}` |
+| Escore de condução | `POST api/trips/driverscore/standard/from/{from}/to/{to}` · `POST api/scoring/scorecard_flexibledriver` |
+| Falhas eletrônicas (DTC) | `GET api/dtc/faultedassets/{groupId}` · `GET api/dtc/messages/{assetId}/{from}/{to}` |
+| CNH e certificações | `GET api/driverlicence/group/{groupId}` · `GET api/drivercertification/group/{groupId}` |
+| Manutenção e vistoria | `GET api/reminders/group/{groupId}/service` · `.../licence` · `.../roadworthy-certificate` |
+| Histórico de manutenção | `GET api/assets/servicehistory/group/{groupId}/{from}/to/{to}` |
+| Cercas e pontos de interesse | `GET api/locations/group/{groupId}` · `POST api/locations/group/{groupId}/inrange/{meters}` |
+| Viagens planejadas / rotas | `GET api/journeys/routes/{groupId}` · `GET api/journeys/progress/{journeyId}` |
+| Tacógrafo | `GET api/tachos/asset/{assetId}/range/from/{from}/to/{to}` |
+| Sincronização incremental por token | `.../createdsince/sincetoken/{sinceToken}/quantity/{quantity}` |
+
+> As rotas `createdsince/sincetoken` permitem trocar a janela por data por um ponteiro
+> incremental — o caminho natural caso o volume da frota cresça.
+
+## 6. Teste e diagnóstico
 
 - **Testar conexão** (`POST /api/integrations/track7/test`) — autentica e lista as
   organizações visíveis; funciona com os campos ainda não salvos.

@@ -226,6 +226,22 @@ interface RegionPreset {
   apiUrl: string;
 }
 
+/** Tipos de grupo devolvidos pela API (enum em inglês) → rótulo em português. */
+const GROUP_TYPE_LABELS: Record<string, string> = {
+  DataCentre: 'Data center',
+  RsoGroup: 'Grupo RSO',
+  DealerGroup: 'Revenda',
+  MultiLevelOrg: 'Organização multinível',
+  OrganisationGroup: 'Organização',
+  OrganisationSubGroup: 'Subgrupo',
+  SiteGroup: 'Site',
+  DefaultSite: 'Site padrão',
+  SecurityGroup: 'Grupo de segurança',
+  NotificationGroup: 'Grupo de notificação',
+  MobileDeviceAdminCommissioningGroup: 'Comissionamento',
+  DriverUserGroup: 'Grupo de motoristas',
+};
+
 const CRON_PRESETS: Array<{ value: string; label: string }> = [
   { value: '*/15 * * * *', label: 'A cada 15 minutos' },
   { value: '0 * * * *', label: 'A cada hora' },
@@ -617,7 +633,9 @@ function GroupsModal({ open, onClose }: { open: boolean; onClose: () => void }) 
                 <p className="text-sm font-medium text-slate-800">{group.name}</p>
                 <p className="text-xs text-slate-400">
                   #{group.group_id}
-                  {group.group_type_name ? ` · ${group.group_type_name}` : ''}
+                  {group.group_type_name
+                    ? ` · ${GROUP_TYPE_LABELS[group.group_type_name] ?? group.group_type_name}`
+                    : ''}
                 </p>
               </div>
               {group.is_organisation && <Badge tone="info">Organização</Badge>}

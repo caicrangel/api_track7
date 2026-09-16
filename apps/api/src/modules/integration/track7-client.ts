@@ -14,9 +14,12 @@
  *   POST api/positions/groups/latest/{quantity}       → últimas posições (body: [groupIds])
  *   POST api/positions/assets/from/{from}/to/{to}     → posições por período (body: [assetIds])
  *   POST api/trips/assets/from/{from}/to/{to}         → viagens por período (body: [assetIds])
- *   POST api/events/assets/from/{from}/to/{to}        → eventos por período (body: [assetIds])
+ *   POST api/events/assets/from/{from}/to/{to}        → eventos por período (body: EventFilter)
+ *   GET  api/libraryevents/organisation/{organisationId} → biblioteca de tipos de evento
  *
  * Datas nos segmentos de URL usam o formato yyyyMMddHHmmss em UTC.
+ * Posições, viagens e eventos aceitam no máximo 7 dias por chamada — use
+ * `splitWindows()` para fatiar períodos maiores.
  */
 import { upstream } from '../../lib/errors.js';
 
@@ -95,7 +98,7 @@ export interface Track7Position {
   Heading?: number | null;
   OdometerKilometres?: number | null;
   FormattedAddress?: string | null;
-  Source?: number | null;
+  Source?: string | null;
   [key: string]: unknown;
 }
 
@@ -120,7 +123,7 @@ export interface Track7Trip {
   FuelUsedLitres?: number | null;
   StartPosition?: Track7Position | null;
   EndPosition?: Track7Position | null;
-  Classification?: unknown;
+  Classification?: { Classification?: string; Comment?: string } | null;
   [key: string]: unknown;
 }
 
@@ -130,7 +133,6 @@ export interface Track7Event {
   DriverId?: number;
   EventTypeId?: number;
   EventCategory?: string;
-  Description?: string;
   StartDateTime?: string | null;
   EndDateTime?: string | null;
   Value?: number | null;
@@ -142,6 +144,26 @@ export interface Track7Event {
   StartOdometerKilometres?: number | null;
   StartPosition?: Track7Position | null;
   [key: string]: unknown;
+}
+
+export interface Track7LibraryEvent {
+  EventTypeId: number;
+  Description?: string;
+  EventType?: string;
+  DisplayUnits?: string;
+  FormatType?: string;
+  ValueName?: string;
+}
+
+/**
+ * Corpo exigido por api/events/*: a API não aceita uma lista simples de IDs.
+ * EntityIds = ativos (ou motoristas/grupos, conforme a rota);
+ * EventTypeIds = filtro opcional de tipos de evento.
+ */
+export interface Track7EventFilter {
+  EntityIds: number[];
+  EventTypeIds: number[];
+  MenuId: string;
 }
 
 /** Presets de região da plataforma MiX. */
@@ -203,6 +225,24 @@ export function timeSpanToSeconds(value: unknown): number | null {
   return (
     Number(days ?? 0) * 86400 + Number(hours) * 3600 + Number(minutes) * 60 + Number(seconds)
   );
+}
+
+/**
+ * Fatia um período em janelas de no máximo `maxDays` dias — limite imposto
+ * pela API em posições, viagens e eventos.
+ */
+export function splitWindows(from: Date, to: Date, maxDays = 7): Array<[Date, Date]> {
+  const windows: Array<[Date, Date]> = [];
+  const maxMs = maxDays * 86_400_000;
+  let cursor = from.getTime();
+  const end = to.getTime();
+  if (cursor >= end) return [[from, to]];
+  while (cursor < end) {
+    const next = Math.min(cursor + maxMs, end);
+    windows.push([new Date(cursor), new Date(next)]);
+    cursor = next;
+  }
+  return windows;
 }
 
 interface TokenState {
@@ -373,9 +413,17 @@ export class Track7Client {
     return this.request<Track7Driver[]>(`api/drivers/organisation/${organisationId}`);
   }
 
-  /** Últimas N posições dos veículos dos grupos informados. */
-  getLatestPositionsByGroups(groupIds: number[], quantity = 1): Promise<Track7Position[]> {
-    return this.request<Track7Position[]>(`api/positions/groups/latest/${quantity}`, {
+  /**
+   * Últimas N posições dos veículos dos grupos informados.
+   * `quantity` precisa ser 1 quando há mais de um veículo (regra da API).
+   */
+  getLatestPositionsByGroups(
+    groupIds: number[],
+    quantity = 1,
+    ensureReverseGeocoded = true,
+  ): Promise<Track7Position[]> {
+    const query = ensureReverseGeocoded ? '?ensureReverseGeocoded=true' : '';
+    return this.request<Track7Position[]>(`api/positions/groups/latest/${quantity}${query}`, {
       method: 'POST',
       body: groupIds,
     });
@@ -389,7 +437,7 @@ export class Track7Client {
     });
   }
 
-  /** Posições de um período (máx. recomendado: janelas de 24h por lote). */
+  /** Posições de um período (máximo de 7 dias por chamada). */
   getPositionsByAssets(assetIds: number[], from: Date, to: Date): Promise<Track7Position[]> {
     return this.request<Track7Position[]>(
       `api/positions/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`,
@@ -397,7 +445,7 @@ export class Track7Client {
     );
   }
 
-  /** Viagens de um período. */
+  /** Viagens de um período (máximo de 7 dias por chamada). */
   getTripsByAssets(assetIds: number[], from: Date, to: Date): Promise<Track7Trip[]> {
     return this.request<Track7Trip[]>(`api/trips/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`, {
       method: 'POST',
@@ -405,12 +453,26 @@ export class Track7Client {
     });
   }
 
-  /** Eventos de um período. */
-  getEventsByAssets(assetIds: number[], from: Date, to: Date): Promise<Track7Event[]> {
+  /**
+   * Eventos de um período (máximo de 7 dias por chamada).
+   * A rota exige um EventFilter no corpo — uma lista de IDs é rejeitada.
+   */
+  getEventsByAssets(
+    assetIds: number[],
+    from: Date,
+    to: Date,
+    eventTypeIds: number[] = [],
+  ): Promise<Track7Event[]> {
+    const filter: Track7EventFilter = { EntityIds: assetIds, EventTypeIds: eventTypeIds, MenuId: '' };
     return this.request<Track7Event[]>(`api/events/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`, {
       method: 'POST',
-      body: assetIds,
+      body: filter,
     });
+  }
+
+  /** Biblioteca de tipos de evento da organização (descrições legíveis). */
+  getLibraryEvents(organisationId: number | string): Promise<Track7LibraryEvent[]> {
+    return this.request<Track7LibraryEvent[]>(`api/libraryevents/organisation/${organisationId}`);
   }
 
   /** Teste de conectividade: autentica e lista as organizações visíveis. */

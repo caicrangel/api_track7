@@ -8,10 +8,11 @@ import type {
   Track7Driver,
   Track7Event,
   Track7Group,
+  Track7LibraryEvent,
   Track7Position,
   Track7Trip,
 } from './track7-client.js';
-import { timeSpanToSeconds, Track7Client } from './track7-client.js';
+import { splitWindows, timeSpanToSeconds, Track7Client } from './track7-client.js';
 
 export type SyncKind = 'catalog' | 'incremental' | 'history';
 
@@ -174,7 +175,20 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       return positions.length;
     });
 
-    // 6) Histórico (viagens e eventos)
+    // 6) Biblioteca de tipos de evento (dá nome legível aos eventos)
+    const eventTypes = await track('tipos_evento', async () => {
+      const library = await client.getLibraryEvents(organisationId);
+      await upsertEventTypes(organizationId, library);
+      return library;
+    });
+    const eventTypeNames = new Map<number, string>();
+    for (const item of eventTypes ?? []) {
+      if (item.EventTypeId != null && item.Description) {
+        eventTypeNames.set(Number(item.EventTypeId), item.Description);
+      }
+    }
+
+    // 7) Histórico (viagens e eventos)
     if (kind !== 'catalog' && assetIds && assetIds.length) {
       const to = options.to ?? new Date();
       const from =
@@ -189,7 +203,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
             ));
 
       await track('viagens', () => syncTrips(organizationId, client, assetIds, from, to));
-      await track('eventos', () => syncEvents(organizationId, client, assetIds, from, to));
+      await track('eventos', () => syncEvents(organizationId, client, assetIds, from, to, eventTypeNames));
     } else {
       steps.push({ step: 'viagens', status: 'skipped', durationMs: 0 });
       steps.push({ step: 'eventos', status: 'skipped', durationMs: 0 });
@@ -444,7 +458,7 @@ async function upsertPositions(
     num(p.Heading),
     num(p.OdometerKilometres),
     p.FormattedAddress ?? null,
-    num(p.Source),
+    p.Source ?? null,
   ]);
 
   return transaction(async (client) => {
@@ -537,9 +551,12 @@ async function syncTrips(
   to: Date,
 ): Promise<number> {
   let total = 0;
-  for (const batch of chunk(assetIds, 50)) {
-    const trips = await client.getTripsByAssets(batch, from, to);
-    total += await upsertTrips(organizationId, trips);
+  // a API limita cada consulta a 7 dias
+  for (const [windowStart, windowEnd] of splitWindows(from, to)) {
+    for (const batch of chunk(assetIds, 50)) {
+      const trips = await client.getTripsByAssets(batch, windowStart, windowEnd);
+      total += await upsertTrips(organizationId, trips);
+    }
   }
   return total;
 }
@@ -574,7 +591,7 @@ async function upsertTrips(organizationId: string, trips: Track7Trip[]): Promise
     num(t.EndPosition?.Latitude),
     num(t.EndPosition?.Longitude),
     t.EndPosition?.FormattedAddress ?? null,
-    typeof t.Classification === 'string' ? t.Classification : null,
+    t.Classification?.Classification ?? null,
     JSON.stringify({ ...t, SubTrips: undefined }),
   ]);
 
@@ -619,16 +636,54 @@ async function syncEvents(
   assetIds: number[],
   from: Date,
   to: Date,
+  eventTypeNames: Map<number, string>,
 ): Promise<number> {
   let total = 0;
-  for (const batch of chunk(assetIds, 50)) {
-    const events = await client.getEventsByAssets(batch, from, to);
-    total += await upsertEvents(organizationId, events);
+  // a API limita cada consulta a 7 dias
+  for (const [windowStart, windowEnd] of splitWindows(from, to)) {
+    for (const batch of chunk(assetIds, 50)) {
+      const events = await client.getEventsByAssets(batch, windowStart, windowEnd);
+      total += await upsertEvents(organizationId, events, eventTypeNames);
+    }
   }
   return total;
 }
 
-async function upsertEvents(organizationId: string, events: Track7Event[]): Promise<number> {
+async function upsertEventTypes(
+  organizationId: string,
+  library: Track7LibraryEvent[],
+): Promise<number> {
+  if (!library.length) return 0;
+  const values = library.map((item) => [
+    organizationId,
+    Number(item.EventTypeId),
+    item.Description ?? null,
+    item.EventType ?? null,
+    item.DisplayUnits ?? null,
+    item.FormatType ?? null,
+    item.ValueName ?? null,
+    JSON.stringify(item),
+  ]);
+  const columns = [
+    'organization_id',
+    'event_type_id',
+    'description',
+    'event_type',
+    'display_units',
+    'format_type',
+    'value_name',
+    'raw',
+  ];
+  return transaction((client) =>
+    bulkUpsert(client, 't7_event_types', columns, values, ['organization_id', 'event_type_id'], columns.slice(2)),
+  );
+}
+
+async function upsertEvents(
+  organizationId: string,
+  events: Track7Event[],
+  eventTypeNames: Map<number, string> = new Map(),
+): Promise<number> {
   const valid = events.filter((e) => parseDate(e.StartDateTime));
   if (!valid.length) return 0;
 
@@ -639,7 +694,8 @@ async function upsertEvents(organizationId: string, events: Track7Event[]): Prom
     num(e.DriverId),
     num(e.EventTypeId),
     e.EventCategory ?? null,
-    (e.Description as string | undefined) ?? null,
+    // o contrato da API não traz descrição no evento: ela vem da biblioteca de tipos
+    (e.EventTypeId != null ? eventTypeNames.get(Number(e.EventTypeId)) : undefined) ?? null,
     parseDate(e.StartDateTime),
     parseDate(e.EndDateTime),
     num(e.Value),
