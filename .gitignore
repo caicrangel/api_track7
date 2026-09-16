@@ -8,3 +8,6 @@ build/
 coverage/
 .vite/
 apps/api/storage/
+
+# artefatos de build do TypeScript
+*.tsbuildinfo
