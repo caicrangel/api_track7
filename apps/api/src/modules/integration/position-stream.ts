@@ -50,6 +50,8 @@ export interface CollectResult {
   sinceToken: string | null;
   gapDetected: boolean;
   durationMs: number;
+  /** Motivo de não ter coletado nada — ausente quando o ciclo rodou. */
+  skipped?: string;
 }
 
 export async function getCursor(operatorId: string): Promise<StreamCursor | null> {
@@ -85,14 +87,32 @@ export async function collectPositions(
   const startedAt = Date.now();
   const release = await acquireLock(`stream:${operatorId}`, 120);
   if (!release) {
-    return { collected: 0, pages: 0, hasMoreItems: false, sinceToken: null, gapDetected: false, durationMs: 0 };
+    return {
+      collected: 0,
+      pages: 0,
+      hasMoreItems: false,
+      sinceToken: null,
+      gapDetected: false,
+      durationMs: 0,
+      skipped: 'ciclo anterior ainda em andamento',
+    };
   }
 
   try {
-    const { row, client } = await buildClient(operatorId);
-    const organisationId = row.organisation_id;
+    const { row, client, operator } = await buildClient(operatorId);
+    const organisationId = operator.track7_organisation_id;
     if (!organisationId) {
-      throw new Error('Organização da Track7 ainda não identificada — rode uma sincronização de catálogo antes.');
+      // Não é falha: a organização é resolvida na primeira sincronização de
+      // catálogo. Até lá o coletor fica de lado, sem poluir o log.
+      return {
+        collected: 0,
+        pages: 0,
+        hasMoreItems: false,
+        sinceToken: null,
+        gapDetected: false,
+        durationMs: Date.now() - startedAt,
+        skipped: 'organização da Track7 ainda não identificada — aguardando a primeira sincronização de catálogo',
+      };
     }
 
     const cursor = await getCursor(operatorId);

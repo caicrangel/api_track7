@@ -3,11 +3,14 @@ import { one, query } from '../../db/pool.js';
 import { decryptSecret, encryptSecret } from '../../lib/crypto.js';
 import { badRequest } from '../../lib/errors.js';
 import { Track7Client, TRACK7_REGIONS } from './track7-client.js';
+import { getOperatorById, type OperatorRow } from '../operators/operators-service.js';
 
 export interface IntegrationCredentialRow {
   id: string;
   organization_id: string;
-  operator_id: string;
+  /** Nulo quando a credencial é compartilhada pela conta. */
+  operator_id: string | null;
+  credential_scope: 'OPERATOR' | 'ORGANIZATION';
   provider: string;
   label: string;
   region: string;
@@ -43,6 +46,8 @@ export const credentialsInputSchema = z.object({
   password: z.string().optional(),
   organisationId: z.union([z.number(), z.string(), z.null()]).optional(),
   groupIds: z.array(z.union([z.number(), z.string()])).optional(),
+  /** OPERATOR = chaves próprias da empresa · ORGANIZATION = acesso único do consórcio. */
+  credentialScope: z.enum(['OPERATOR', 'ORGANIZATION']).optional(),
   syncEnabled: z.boolean().optional(),
   syncCron: z.string().optional(),
   historyDays: z.number().int().min(1).max(90).optional(),
@@ -53,7 +58,7 @@ export const credentialsInputSchema = z.object({
 
 export type CredentialsInput = z.infer<typeof credentialsInputSchema>;
 
-/** Credenciais são por empresa operadora, não por conta. */
+/** Credencial própria da operadora, se houver. */
 export async function getCredentialRow(operatorId: string): Promise<IntegrationCredentialRow | null> {
   return one<IntegrationCredentialRow>(
     `SELECT * FROM integration_credentials WHERE operator_id = $1 AND provider = 'track7'`,
@@ -61,8 +66,35 @@ export async function getCredentialRow(operatorId: string): Promise<IntegrationC
   );
 }
 
+/** Credencial compartilhada da conta — atende todas as operadoras sem chaves próprias. */
+export async function getSharedCredentialRow(
+  organizationId: string,
+): Promise<IntegrationCredentialRow | null> {
+  return one<IntegrationCredentialRow>(
+    `SELECT * FROM integration_credentials
+      WHERE organization_id = $1 AND operator_id IS NULL AND provider = 'track7'`,
+    [organizationId],
+  );
+}
+
+/**
+ * Credencial efetiva de uma operadora: a própria tem precedência; na falta
+ * dela, vale a credencial compartilhada da conta.
+ */
+export async function resolveCredential(
+  operator: OperatorRow,
+): Promise<{ row: IntegrationCredentialRow; shared: boolean } | null> {
+  const own = await getCredentialRow(operator.id);
+  if (own?.client_id_enc) return { row: own, shared: false };
+
+  const shared = await getSharedCredentialRow(operator.organization_id);
+  if (shared?.client_id_enc) return { row: shared, shared: true };
+
+  return own ? { row: own, shared: false } : null;
+}
+
 /** Versão segura para a UI — nunca devolve segredos, apenas se estão preenchidos. */
-export function toPublicView(row: IntegrationCredentialRow | null) {
+export function toPublicView(row: IntegrationCredentialRow | null, shared = false) {
   if (!row) {
     const preset = TRACK7_REGIONS.us;
     return {
@@ -77,6 +109,8 @@ export function toPublicView(row: IntegrationCredentialRow | null) {
       hasPassword: false,
       organisationId: null,
       groupIds: [] as number[],
+      credentialScope: 'OPERATOR' as const,
+      shared: false,
       syncEnabled: true,
       syncCron: '0 */6 * * *',
       historyDays: 7,
@@ -100,6 +134,8 @@ export function toPublicView(row: IntegrationCredentialRow | null) {
     hasPassword: Boolean(row.password_enc),
     organisationId: row.organisation_id,
     groupIds: row.group_ids ?? [],
+    credentialScope: row.credential_scope,
+    shared,
     syncEnabled: row.sync_enabled,
     syncCron: row.sync_cron,
     historyDays: row.history_days,
@@ -118,10 +154,14 @@ export function toPublicView(row: IntegrationCredentialRow | null) {
  */
 export async function saveCredentials(
   organizationId: string,
-  operatorId: string,
+  operatorId: string | null,
   input: CredentialsInput,
 ): Promise<IntegrationCredentialRow> {
-  const current = await getCredentialRow(operatorId);
+  const credentialScope = input.credentialScope ?? (operatorId ? 'OPERATOR' : 'ORGANIZATION');
+  const effectiveOperatorId = credentialScope === 'ORGANIZATION' ? null : operatorId;
+  const current = effectiveOperatorId
+    ? await getCredentialRow(effectiveOperatorId)
+    : await getSharedCredentialRow(organizationId);
   const preset = TRACK7_REGIONS[input.region] ?? TRACK7_REGIONS.us;
 
   const identityUrl = input.identityUrl?.trim() || (input.region !== current?.region ? preset.identityUrl : current?.identity_url) || preset.identityUrl;
@@ -148,9 +188,9 @@ export async function saveCredentials(
        (organization_id, operator_id, provider, region, identity_url, api_url, scope,
         client_id_enc, client_secret_enc, username_enc, password_enc,
         organisation_id, group_ids, sync_enabled, sync_cron, history_days,
-        stream_enabled, stream_interval_seconds, stream_quantity, updated_at)
-     VALUES ($1,$2,'track7',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18, now())
-     ON CONFLICT (operator_id, provider) DO UPDATE SET
+        stream_enabled, stream_interval_seconds, stream_quantity, credential_scope, updated_at)
+     VALUES ($1,$2,'track7',$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19, now())
+     ON CONFLICT ${effectiveOperatorId ? '(operator_id, provider) WHERE operator_id IS NOT NULL' : '(organization_id, provider) WHERE operator_id IS NULL'} DO UPDATE SET
         region = EXCLUDED.region,
         identity_url = EXCLUDED.identity_url,
         api_url = EXCLUDED.api_url,
@@ -167,11 +207,12 @@ export async function saveCredentials(
         stream_enabled = EXCLUDED.stream_enabled,
         stream_interval_seconds = EXCLUDED.stream_interval_seconds,
         stream_quantity = EXCLUDED.stream_quantity,
+        credential_scope = EXCLUDED.credential_scope,
         updated_at = now()
      RETURNING *`,
     [
       organizationId,
-      operatorId,
+      effectiveOperatorId,
       input.region ?? current?.region ?? 'us',
       identityUrl,
       apiUrl,
@@ -188,6 +229,7 @@ export async function saveCredentials(
       input.streamEnabled ?? current?.stream_enabled ?? true,
       input.streamIntervalSeconds ?? current?.stream_interval_seconds ?? 30,
       input.streamQuantity ?? current?.stream_quantity ?? 1000,
+      credentialScope,
     ],
   );
   return row!;
@@ -196,12 +238,21 @@ export async function saveCredentials(
 export interface ResolvedCredentials {
   row: IntegrationCredentialRow;
   client: Track7Client;
+  operator: OperatorRow;
+  /** true quando veio da credencial compartilhada da conta. */
+  shared: boolean;
 }
 
 /** Monta o cliente da Track7 a partir das credenciais cifradas da organização. */
 export async function buildClient(operatorId: string): Promise<ResolvedCredentials> {
-  const row = await getCredentialRow(operatorId);
-  if (!row) throw badRequest('Integração Track7 ainda não configurada para esta empresa operadora.');
+  const operator = await getOperatorById(operatorId);
+  const resolved = await resolveCredential(operator);
+  if (!resolved) {
+    throw badRequest(
+      `Integração Track7 não configurada para "${operator.name}" — cadastre chaves próprias ou uma credencial compartilhada da conta.`,
+    );
+  }
+  const { row, shared } = resolved;
 
   const clientId = decryptSecret(row.client_id_enc);
   const clientSecret = decryptSecret(row.client_secret_enc);
@@ -220,6 +271,8 @@ export async function buildClient(operatorId: string): Promise<ResolvedCredentia
 
   return {
     row,
+    operator,
+    shared,
     client: new Track7Client({
       identityUrl: row.identity_url,
       apiUrl: row.api_url,
@@ -234,10 +287,13 @@ export async function buildClient(operatorId: string): Promise<ResolvedCredentia
 
 /** Cliente temporário a partir de um payload (usado no "Testar conexão" antes de salvar). */
 export async function buildEphemeralClient(
-  operatorId: string,
+  organizationId: string,
+  operatorId: string | null,
   input: CredentialsInput,
 ): Promise<Track7Client> {
-  const current = await getCredentialRow(operatorId);
+  const current = operatorId
+    ? ((await getCredentialRow(operatorId)) ?? (await getSharedCredentialRow(organizationId)))
+    : await getSharedCredentialRow(organizationId);
   const preset = TRACK7_REGIONS[input.region] ?? TRACK7_REGIONS.us;
   const pick = (incoming: string | undefined, encrypted: string | null | undefined) =>
     incoming && incoming.trim() ? incoming.trim() : decryptSecret(encrypted);
@@ -266,6 +322,10 @@ export async function buildEphemeralClient(
   });
 }
 
+/**
+ * Marca o resultado na credencial da operadora. Com credencial compartilhada
+ * não há linha por operadora, então o histórico fica em sync_runs.
+ */
 export async function markSyncResult(
   operatorId: string,
   status: string,

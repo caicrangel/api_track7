@@ -8,6 +8,42 @@ A Track7 opera sobre a plataforma **MiX Telematics** (hoje apresentada como
 
 Implementação: `apps/api/src/modules/integration/track7-client.ts`.
 
+## 0. Dois modos de credencial
+
+Na plataforma da Track7 um mesmo login pode enxergar **várias organizações** —
+`api/organisationgroups` devolve uma lista. O sistema suporta os dois arranjos:
+
+| Modo | Quando usar | Como fica |
+|------|-------------|-----------|
+| **Por operadora** | cada empresa tem o próprio contrato e as próprias chaves | uma credencial em cada operadora |
+| **Compartilhado** | a Track7 emite um acesso único do consórcio | uma credencial na conta, válida para todas |
+
+Os dois convivem: a credencial **própria da operadora tem precedência**; na falta
+dela, vale a credencial compartilhada da conta. Dá para migrar de um modo para o
+outro sem perder dado — basta cadastrar (ou apagar) as chaves da operadora.
+
+O identificador da organização na Track7 (`track7_organisation_id`) é atributo da
+**operadora**, não da credencial. É isso que permite um acesso só atender 33
+empresas: cada operadora aponta para a sua organização dentro daquele login.
+
+### Descoberta de operadoras
+
+Com a credencial compartilhada salva, **Configurações › Integrações › Acesso único
+da conta › Descobrir operadoras** lista as organizações visíveis e as compara com
+as operadoras cadastradas:
+
+| Situação | Significado |
+|----------|-------------|
+| Vinculada | já existe operadora apontando para essa organização |
+| Nova | será criada |
+| Conflito de nome | já há operadora com esse nome vinculada a outra organização — resolver à mão |
+
+O vínculo por nome é feito sem acento e sem diferenciar maiúsculas. Nada é alterado
+na pré-visualização; a criação só acontece ao confirmar.
+
+Rotas: `GET/PUT /api/integrations/track7/shared` e `POST /api/integrations/track7/discover`
+(com `apply: true` para efetivar).
+
 ## 1. Autenticação
 
 OpenID Connect · **Resource Owner Password Flow**.

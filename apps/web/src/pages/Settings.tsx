@@ -8,6 +8,8 @@ import {
   RefreshCw,
   Radio,
   Save,
+  Search,
+  Share2,
   ScrollText,
   Stethoscope,
   XCircle,
@@ -219,6 +221,8 @@ interface IntegrationView {
   streamEnabled: boolean;
   streamIntervalSeconds: number;
   streamQuantity: number;
+  credentialScope: 'OPERATOR' | 'ORGANIZATION';
+  shared: boolean;
   lastSyncAt: string | null;
   lastSyncStatus: string | null;
   lastSyncError: string | null;
@@ -246,6 +250,16 @@ const GROUP_TYPE_LABELS: Record<string, string> = {
   MobileDeviceAdminCommissioningGroup: 'Comissionamento',
   DriverUserGroup: 'Grupo de motoristas',
 };
+
+/** Presets usados antes de a API responder (visão consolidada). */
+const DEFAULT_REGIONS: RegionPreset[] = [
+  {
+    key: 'us',
+    label: 'Américas (US)',
+    identityUrl: 'https://identity.us.mixtelematics.com/core',
+    apiUrl: 'https://integrate.us.mixtelematics.com',
+  },
+];
 
 const CRON_PRESETS: Array<{ value: string; label: string }> = [
   { value: '*/15 * * * *', label: 'A cada 15 minutos' },
@@ -282,10 +296,13 @@ function IntegrationTab() {
   const [showGroups, setShowGroups] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
 
+  const needsOperator = !operatorId && operators.length > 1;
+
   const { data, isLoading } = useQuery({
     queryKey: ['integration-track7', operatorId],
     queryFn: () =>
       api<{ integration: IntegrationView; regions: RegionPreset[] }>('/integrations/track7', { query: scope }),
+    enabled: !needsOperator,
     refetchInterval: (query) =>
       (query.state.data as { integration: IntegrationView } | undefined)?.integration.lastSyncStatus === 'RUNNING'
         ? 5000
@@ -369,18 +386,42 @@ function IntegrationTab() {
     onError: (err: Error) => setFeedback({ tone: 'danger', message: err.message }),
   });
 
-  if (isLoading) return <Spinner />;
-  const integration = data!.integration;
+  // Sem operadora escolhida só faz sentido mostrar o acesso da conta —
+  // as credenciais próprias são individuais.
+  if (needsOperator) {
+    return (
+      <>
+        <SharedCredentialCard editable={editable} regions={DEFAULT_REGIONS} />
+        <div className="mt-4">
+          <Alert tone="info" title="Escolha uma empresa operadora">
+            Para ver ou cadastrar credenciais próprias e acompanhar o coletor, selecione a operadora no
+            seletor do topo da barra lateral.
+          </Alert>
+        </div>
+      </>
+    );
+  }
+
+  if (isLoading || !data) return <Spinner />;
+  const integration = data.integration;
 
   return (
     <>
-      <Card className="p-5">
+      <SharedCredentialCard editable={editable} regions={data.regions} />
+
+      <Card className="mt-4 p-5">
         <div className="flex flex-wrap items-center gap-3">
           <Plug className="h-5 w-5 text-brand-600" />
-          <h2 className="text-base font-semibold text-slate-900">Track7 (MiX Telematics)</h2>
-          {integration.configured ? (
+          <h2 className="text-base font-semibold text-slate-900">
+            Credenciais desta operadora
+          </h2>
+          {integration.shared ? (
+            <Badge tone="info" icon={<Share2 className="h-3.5 w-3.5" />}>
+              Usando o acesso da conta
+            </Badge>
+          ) : integration.configured ? (
             <Badge tone="success" icon={<CheckCircle2 className="h-3.5 w-3.5" />}>
-              Credenciais cadastradas
+              Credenciais próprias
             </Badge>
           ) : (
             <Badge tone="warning" icon={<XCircle className="h-3.5 w-3.5" />}>
@@ -389,9 +430,9 @@ function IntegrationTab() {
           )}
         </div>
         <p className="mt-2 max-w-4xl text-sm text-slate-500">
-          Sincroniza veículos, motoristas, posições, viagens e eventos da Track7. As credenciais são guardadas
-          cifradas (AES-256-GCM) e nunca retornam para a tela — os campos aparecem vazios por segurança,
-          preencha apenas para trocar.
+          {integration.shared
+            ? 'Esta operadora está sendo atendida pelo acesso único da conta. Preencha os campos abaixo apenas se ela tiver chaves próprias — elas passam a ter precedência.'
+            : 'Sincroniza veículos, motoristas, posições, viagens e eventos da Track7. As credenciais são guardadas cifradas (AES-256-GCM) e nunca retornam para a tela — os campos aparecem vazios por segurança, preencha apenas para trocar.'}
         </p>
 
         {!operatorId && operators.length > 1 && (
@@ -592,6 +633,341 @@ function IntegrationTab() {
       <GroupsModal open={showGroups} onClose={() => setShowGroups(false)} operatorId={operatorId} />
       <SyncHistoryModal open={showHistory} onClose={() => setShowHistory(false)} operatorId={operatorId} />
     </>
+  );
+}
+
+/**
+ * Acesso único da conta: uma credencial que atende todas as operadoras sem
+ * chaves próprias. É o modo indicado quando a Track7 emite um acesso de
+ * consórcio que enxerga várias organizações.
+ */
+function SharedCredentialCard({ editable, regions }: { editable: boolean; regions: RegionPreset[] }) {
+  const queryClient = useQueryClient();
+  const { refresh } = useOperator();
+  const [open, setOpen] = useState(false);
+  const [showDiscovery, setShowDiscovery] = useState(false);
+  const [feedback, setFeedback] = useState<{ tone: 'success' | 'danger'; message: string } | null>(null);
+  const [form, setForm] = useState({
+    region: 'us',
+    identityUrl: '',
+    apiUrl: '',
+    clientId: '',
+    clientSecret: '',
+    username: '',
+    password: '',
+  });
+
+  const { data, isLoading } = useQuery({
+    queryKey: ['integration-track7-shared'],
+    queryFn: () => api<{ integration: IntegrationView }>('/integrations/track7/shared'),
+  });
+
+  useEffect(() => {
+    if (!data?.integration) return;
+    setForm((prev) => ({
+      ...prev,
+      region: data.integration.region,
+      identityUrl: data.integration.identityUrl,
+      apiUrl: data.integration.apiUrl,
+    }));
+  }, [data]);
+
+  const save = useMutation({
+    mutationFn: () =>
+      api('/integrations/track7/shared', {
+        method: 'PUT',
+        body: {
+          region: form.region,
+          identityUrl: form.identityUrl || undefined,
+          apiUrl: form.apiUrl || undefined,
+          clientId: form.clientId || undefined,
+          clientSecret: form.clientSecret || undefined,
+          username: form.username || undefined,
+          password: form.password || undefined,
+        },
+      }),
+    onSuccess: () => {
+      setForm((prev) => ({ ...prev, clientId: '', clientSecret: '', username: '', password: '' }));
+      setFeedback({ tone: 'success', message: 'Acesso da conta salvo. Agora descubra as operadoras.' });
+      void queryClient.invalidateQueries({ queryKey: ['integration-track7-shared'] });
+      void queryClient.invalidateQueries({ queryKey: ['integration-track7'] });
+    },
+    onError: (err: Error) => setFeedback({ tone: 'danger', message: err.message }),
+  });
+
+  if (isLoading) return null;
+  const shared = data!.integration;
+
+  return (
+    <>
+      <Card className="p-5">
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-center gap-3 text-left"
+        >
+          <Share2 className="h-5 w-5 text-brand-600" />
+          <h2 className="flex-1 text-base font-semibold text-slate-900">Acesso único da conta</h2>
+          {shared.configured ? (
+            <Badge tone="success" icon={<CheckCircle2 className="h-3.5 w-3.5" />}>
+              Configurado
+            </Badge>
+          ) : (
+            <Badge tone="neutral">Não configurado</Badge>
+          )}
+          <ChevronDownIcon open={open} />
+        </button>
+
+        <p className="mt-2 max-w-4xl text-sm text-slate-500">
+          Uma credencial só, válida para todas as operadoras que não tiverem chaves próprias. Use quando a
+          Track7 fornecer um acesso de consórcio — o sistema lista as organizações que ele enxerga e cria as
+          empresas automaticamente.
+        </p>
+
+        {open && (
+          <>
+            {feedback && (
+              <div className="mt-4">
+                <Alert tone={feedback.tone}>{feedback.message}</Alert>
+              </div>
+            )}
+
+            <div className="mt-5 grid gap-4 md:grid-cols-2">
+              <Field label="Região da plataforma">
+                <Select
+                  value={form.region}
+                  disabled={!editable}
+                  onChange={(e) => {
+                    const preset = regions.find((r) => r.key === e.target.value);
+                    setForm({
+                      ...form,
+                      region: e.target.value,
+                      identityUrl: preset?.identityUrl ?? form.identityUrl,
+                      apiUrl: preset?.apiUrl ?? form.apiUrl,
+                    });
+                  }}
+                >
+                  {regions.map((region) => (
+                    <option key={region.key} value={region.key}>
+                      {region.label}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+              <Field label="URL da API">
+                <Input
+                  value={form.apiUrl}
+                  disabled={!editable}
+                  onChange={(e) => setForm({ ...form, apiUrl: e.target.value })}
+                />
+              </Field>
+              <Field label="Client ID">
+                <Input
+                  value={form.clientId}
+                  disabled={!editable}
+                  autoComplete="off"
+                  placeholder={shared.hasClientId ? '•••• (preencha para trocar)' : 'informe o Client ID'}
+                  onChange={(e) => setForm({ ...form, clientId: e.target.value })}
+                />
+              </Field>
+              <Field label="Client Secret">
+                <Input
+                  type="password"
+                  value={form.clientSecret}
+                  disabled={!editable}
+                  autoComplete="new-password"
+                  placeholder={shared.hasClientSecret ? '•••• (preencha para trocar)' : 'informe o Client Secret'}
+                  onChange={(e) => setForm({ ...form, clientSecret: e.target.value })}
+                />
+              </Field>
+              <Field label="Usuário">
+                <Input
+                  value={form.username}
+                  disabled={!editable}
+                  autoComplete="off"
+                  placeholder={shared.hasUsername ? '•••• (preencha para trocar)' : 'usuário do consórcio'}
+                  onChange={(e) => setForm({ ...form, username: e.target.value })}
+                />
+              </Field>
+              <Field label="Senha">
+                <Input
+                  type="password"
+                  value={form.password}
+                  disabled={!editable}
+                  autoComplete="new-password"
+                  placeholder={shared.hasPassword ? '•••• (preencha para trocar)' : 'senha do consórcio'}
+                  onChange={(e) => setForm({ ...form, password: e.target.value })}
+                />
+              </Field>
+            </div>
+
+            <div className="mt-5 flex flex-wrap gap-2">
+              <Button
+                variant="primary"
+                icon={<Save className="h-4 w-4" />}
+                loading={save.isPending}
+                disabled={!editable}
+                onClick={() => save.mutate()}
+              >
+                Salvar acesso da conta
+              </Button>
+              <Button
+                icon={<Search className="h-4 w-4" />}
+                disabled={!shared.configured}
+                onClick={() => setShowDiscovery(true)}
+              >
+                Descobrir operadoras
+              </Button>
+            </div>
+          </>
+        )}
+      </Card>
+
+      <DiscoveryModal
+        open={showDiscovery}
+        onClose={() => setShowDiscovery(false)}
+        onApplied={() => {
+          refresh();
+          void queryClient.invalidateQueries({ queryKey: ['operators'] });
+        }}
+      />
+    </>
+  );
+}
+
+function ChevronDownIcon({ open }: { open: boolean }) {
+  return (
+    <svg
+      className={`h-4 w-4 shrink-0 text-slate-400 transition-transform ${open ? 'rotate-180' : ''}`}
+      viewBox="0 0 20 20"
+      fill="currentColor"
+      aria-hidden
+    >
+      <path
+        fillRule="evenodd"
+        d="M5.23 7.21a.75.75 0 011.06.02L10 11.17l3.71-3.94a.75.75 0 111.08 1.04l-4.25 4.5a.75.75 0 01-1.08 0l-4.25-4.5a.75.75 0 01.02-1.06z"
+        clipRule="evenodd"
+      />
+    </svg>
+  );
+}
+
+interface DiscoveredOrganisation {
+  groupId: number;
+  name: string;
+  status: 'linked' | 'new' | 'conflict';
+  operatorId: string | null;
+  operatorName: string | null;
+}
+
+/** Lista as organizações visíveis e permite criar as operadoras em lote. */
+function DiscoveryModal({
+  open,
+  onClose,
+  onApplied,
+}: {
+  open: boolean;
+  onClose: () => void;
+  onApplied: () => void;
+}) {
+  const [result, setResult] = useState<{ organisations: DiscoveredOrganisation[]; created: number; linked: number } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const preview = useQuery({
+    queryKey: ['track7-discovery'],
+    queryFn: () =>
+      api<{ organisations: DiscoveredOrganisation[]; created: number; linked: number }>(
+        '/integrations/track7/discover',
+        { method: 'POST', body: { apply: false } },
+      ),
+    enabled: open,
+    retry: false,
+  });
+
+  const apply = useMutation({
+    mutationFn: () =>
+      api<{ organisations: DiscoveredOrganisation[]; created: number; linked: number }>(
+        '/integrations/track7/discover',
+        { method: 'POST', body: { apply: true } },
+      ),
+    onSuccess: (data) => {
+      setResult(data);
+      setError(null);
+      onApplied();
+    },
+    onError: (err: Error) => setError(err.message),
+  });
+
+  const data = result ?? preview.data;
+  const pending = data?.organisations.filter((o) => o.status === 'new').length ?? 0;
+
+  const tone = (status: DiscoveredOrganisation['status']) =>
+    status === 'linked' ? 'success' : status === 'new' ? 'info' : 'warning';
+  const label = (status: DiscoveredOrganisation['status']) =>
+    status === 'linked' ? 'Vinculada' : status === 'new' ? 'Nova' : 'Conflito de nome';
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      size="lg"
+      title="Operadoras visíveis na Track7"
+      subtitle="Cada organização que a credencial enxerga vira uma empresa operadora."
+      footer={
+        <>
+          <Button onClick={onClose}>Fechar</Button>
+          <Button
+            variant="primary"
+            loading={apply.isPending}
+            disabled={pending === 0}
+            onClick={() => apply.mutate()}
+          >
+            {pending > 0 ? `Criar ${pending} operadora(s)` : 'Nada a criar'}
+          </Button>
+        </>
+      }
+    >
+      {preview.isLoading ? (
+        <Spinner />
+      ) : preview.error && !data ? (
+        <Alert tone="danger">{(preview.error as Error).message}</Alert>
+      ) : (
+        <div className="space-y-3">
+          {error && <Alert tone="danger">{error}</Alert>}
+          {result && (
+            <Alert tone="success">
+              {result.created} operadora(s) criada(s) e {result.linked} vinculada(s).
+            </Alert>
+          )}
+          <Table>
+            <thead className="bg-slate-50">
+              <tr>
+                <Th>Organização na Track7</Th>
+                <Th>ID</Th>
+                <Th>Situação</Th>
+                <Th>Operadora</Th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {data?.organisations.map((item) => (
+                <tr key={item.groupId}>
+                  <Td className="font-medium text-slate-800">{item.name}</Td>
+                  <Td className="font-mono text-xs">#{item.groupId}</Td>
+                  <Td>
+                    <Badge tone={tone(item.status)}>{label(item.status)}</Badge>
+                  </Td>
+                  <Td>{item.operatorName ?? '—'}</Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+          <p className="text-xs text-slate-500">
+            "Conflito de nome" significa que já existe uma operadora com esse nome vinculada a outra
+            organização — resolva manualmente em Operadoras.
+          </p>
+        </div>
+      )}
+    </Modal>
   );
 }
 

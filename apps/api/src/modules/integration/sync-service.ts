@@ -117,19 +117,34 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
   let fatalError: string | undefined;
 
   try {
-    const { row, client } = await buildClient(operatorId);
+    const { row, client, operator, shared } = await buildClient(operatorId);
 
     // 1) Organizações visíveis / grupo raiz
     const organisationId = await track('organizacao', async () => {
       const orgs = await client.getOrganisationGroups();
       if (!orgs.length) throw badRequest('Nenhuma organização disponível para estas credenciais na Track7.');
-      const configured = row.organisation_id;
+      // a identidade na Track7 é da operadora, não da credencial —
+      // é o que permite uma credencial compartilhada atender várias empresas
+      const configured = operator.track7_organisation_id;
+
+      // Com credencial compartilhada o login enxerga várias organizações;
+      // escolher a primeira sincronizaria a empresa errada.
+      if (!configured && shared && orgs.length > 1) {
+        throw badRequest(
+          `A credencial compartilhada enxerga ${orgs.length} organizações. Use "Descobrir operadoras" para vincular "${operator.name}" à organização correta da Track7.`,
+        );
+      }
+
       const chosen = configured ? orgs.find((o) => Number(o.GroupId) === Number(configured)) : orgs[0];
       const resolved = chosen ?? orgs[0];
+      if (configured && !chosen) {
+        throw badRequest(
+          `A organização #${configured} de "${operator.name}" não está visível para estas credenciais.`,
+        );
+      }
       if (!configured) {
         await query(
-          `UPDATE integration_credentials SET organisation_id = $2, updated_at = now()
-            WHERE operator_id = $1 AND provider = 'track7'`,
+          `UPDATE operators SET track7_organisation_id = $2, updated_at = now() WHERE id = $1`,
           [operatorId, resolved.GroupId],
         );
       }
@@ -148,7 +163,9 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
     });
 
     // Grupos a consultar: os configurados ou a organização inteira
-    const targetGroups = row.group_ids?.length ? row.group_ids.map(Number) : [organisationId];
+    const targetGroups = operator.track7_group_ids?.length
+      ? operator.track7_group_ids.map(Number)
+      : [organisationId];
 
     // 3) Veículos
     const assetIds = await track('veiculos', async () => {

@@ -8,10 +8,13 @@ import {
   buildEphemeralClient,
   credentialsInputSchema,
   getCredentialRow,
+  getSharedCredentialRow,
+  resolveCredential,
   saveCredentials,
   toPublicView,
 } from './credentials.js';
 import { listSyncRuns, runSync } from './sync-service.js';
+import { discoverOperators } from './discovery.js';
 import { backfillPositions, collectPositions, getCursor, seedCursor } from './position-stream.js';
 import { TRACK7_REGIONS } from './track7-client.js';
 import { resolveOperator } from '../operators/operators-service.js';
@@ -25,10 +28,14 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const me = currentUser(request);
     const { operatorId } = operatorQuerySchema.parse(request.query);
     const operator = await resolveOperator(me.orgId, operatorId);
-    const row = await getCredentialRow(operator.id);
+    const effective = await resolveCredential(operator);
     return {
-      operator: { id: operator.id, name: operator.name },
-      integration: toPublicView(row),
+      operator: {
+        id: operator.id,
+        name: operator.name,
+        track7OrganisationId: operator.track7_organisation_id,
+      },
+      integration: toPublicView(effective?.row ?? null, effective?.shared ?? false),
       regions: Object.entries(TRACK7_REGIONS).map(([key, value]) => ({ key, ...value })),
     };
   });
@@ -64,7 +71,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const operator = await resolveOperator(me.orgId, operatorId as string | undefined);
     const input = credentialsInputSchema.partial().parse(body);
     const startedAt = Date.now();
-    const client = await buildEphemeralClient(operator.id, { region: 'us', ...input });
+    const client = await buildEphemeralClient(me.orgId, operator.id, { region: 'us', ...input });
     try {
       const result = await client.testConnection();
       await recordAudit({
@@ -92,6 +99,62 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     }
   });
 
+  /**
+   * Credencial compartilhada da conta — um único acesso que atende todas as
+   * operadoras que não tiverem chaves próprias.
+   */
+  app.get('/track7/shared', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
+    const me = currentUser(request);
+    const row = await getSharedCredentialRow(me.orgId);
+    return {
+      integration: toPublicView(row, true),
+      regions: Object.entries(TRACK7_REGIONS).map(([key, value]) => ({ key, ...value })),
+    };
+  });
+
+  app.put('/track7/shared', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
+    const me = currentUser(request);
+    const input = credentialsInputSchema.parse(request.body ?? {});
+    const saved = await saveCredentials(me.orgId, null, { ...input, credentialScope: 'ORGANIZATION' });
+    await recordAudit({
+      organizationId: me.orgId,
+      userId: me.sub,
+      action: 'integration.track7.save_shared',
+      entity: 'integration',
+      metadata: { region: saved.region, apiUrl: saved.api_url },
+      ip: request.ip,
+    });
+    return { integration: toPublicView(saved, true) };
+  });
+
+  /**
+   * Lista as organizações que a credencial enxerga e as compara com as
+   * operadoras cadastradas. Com `apply`, cria e vincula automaticamente.
+   */
+  app.post('/track7/discover', { preHandler: requireRole('ADMIN', 'MANAGER') }, async (request) => {
+    const me = currentUser(request);
+    const { apply, ...input } = z
+      .object({ apply: z.boolean().default(false) })
+      .passthrough()
+      .parse(request.body ?? {});
+
+    const result = await discoverOperators(me.orgId, {
+      apply,
+      input: credentialsInputSchema.partial().parse(input) as never,
+    });
+
+    if (apply) {
+      await recordAudit({
+        organizationId: me.orgId,
+        userId: me.sub,
+        action: 'integration.track7.discover',
+        metadata: { criadas: result.created, vinculadas: result.linked },
+        ip: request.ip,
+      });
+    }
+    return result;
+  });
+
   /** Grupos/sites disponíveis — da base local ou direto da Track7 (?live=true). */
   app.get('/track7/groups', { preHandler: authenticate }, async (request) => {
     const me = currentUser(request);
@@ -101,9 +164,9 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     const operator = await resolveOperator(me.orgId, operatorId);
 
     if (live) {
-      const { client, row } = await buildClient(operator.id);
+      const { client } = await buildClient(operator.id);
       const orgs = await client.getOrganisationGroups();
-      const rootId = row.organisation_id ?? Number(orgs[0]?.GroupId);
+      const rootId = operator.track7_organisation_id ?? Number(orgs[0]?.GroupId);
       const tree = rootId ? await client.getSubGroups(rootId) : null;
       return { organisations: orgs, tree };
     }

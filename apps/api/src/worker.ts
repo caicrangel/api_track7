@@ -40,13 +40,27 @@ function log(message: string, extra?: unknown): void {
 }
 
 async function refreshSchedules(): Promise<void> {
+  // Uma operadora entra no ar quando tem credencial própria OU quando a conta
+  // tem credencial compartilhada — neste caso ela precisa estar vinculada a uma
+  // organização da Track7, senão não dá para saber quais dados são dela.
   const schedules = await rows<ScheduleRow>(
-    `SELECT c.organization_id, c.operator_id, op.name AS operator_name,
+    `SELECT op.organization_id,
+            op.id   AS operator_id,
+            op.name AS operator_name,
             c.sync_cron, c.sync_enabled, c.stream_enabled, c.stream_interval_seconds
-       FROM integration_credentials c
-       JOIN operators op ON op.id = c.operator_id AND op.status = 'ACTIVE'
-      WHERE c.provider = 'track7'
-        AND c.client_id_enc IS NOT NULL`,
+       FROM operators op
+       JOIN LATERAL (
+         SELECT *
+           FROM integration_credentials ic
+          WHERE ic.provider = 'track7'
+            AND ic.client_id_enc IS NOT NULL
+            AND (ic.operator_id = op.id
+                 OR (ic.operator_id IS NULL AND ic.organization_id = op.organization_id))
+          ORDER BY (ic.operator_id IS NULL)  -- credencial própria tem precedência
+          LIMIT 1
+       ) c ON true
+      WHERE op.status = 'ACTIVE'
+        AND (c.operator_id IS NOT NULL OR op.track7_organisation_id IS NOT NULL)`,
   );
 
   const seen = new Set<string>();
@@ -139,6 +153,7 @@ function applyStreamCollector(schedule: ScheduleRow, index: number, total: numbe
     current.running = true;
     void collectPositions(organizationId, operatorId)
       .then((result) => {
+        if (result.skipped) return; // ainda não pronto: nada a registrar
         if (result.gapDetected) {
           log(`lacuna no histórico — operadora ${operatorName}: rode um backfill`);
         }

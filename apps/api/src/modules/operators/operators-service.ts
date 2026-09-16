@@ -13,6 +13,9 @@ export interface OperatorRow {
   id: string;
   organization_id: string;
   name: string;
+  /** Identidade da empresa na plataforma da Track7. */
+  track7_organisation_id: number | null;
+  track7_group_ids: number[];
   short_name: string | null;
   code: string | null;
   document: string | null;
@@ -35,6 +38,13 @@ export async function listOperators(
       ORDER BY name`,
     [organizationId, options.includeInactive ?? false],
   );
+}
+
+/** Busca só pelo id — para uso interno, quando a conta já foi validada. */
+export async function getOperatorById(operatorId: string): Promise<OperatorRow> {
+  const operator = await one<OperatorRow>(`SELECT * FROM operators WHERE id = $1`, [operatorId]);
+  if (!operator) throw notFound('Empresa operadora não encontrada.');
+  return operator;
 }
 
 export async function getOperator(organizationId: string, operatorId: string): Promise<OperatorRow> {
