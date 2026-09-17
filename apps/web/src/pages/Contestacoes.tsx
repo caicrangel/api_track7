@@ -51,7 +51,7 @@ interface ModeloResposta {
 
 interface PreviewResposta {
   operador: { id: string; nome: string };
-  veiculo: { assetId: number; numeroOrdem: string };
+  veiculo: { assetId: number | string; numeroOrdem: string };
   periodo: { de: string; ate: string; fusoHorario: string };
   decendio: string;
   totalRegistros: number;
@@ -63,7 +63,7 @@ interface PreviewResposta {
 interface Emissao {
   id: string;
   trip_external_id: string;
-  asset_id: number;
+  asset_id: number | string;
   vehicle_order: string | null;
   period_from: string;
   period_to: string;
@@ -97,7 +97,7 @@ export function ContestacoesPage() {
   const vehicles = useQuery({
     queryKey: ['vehicles-contestacao', operatorId],
     queryFn: () =>
-      api<{ data: Array<{ asset_id: number; description: string | null; registration_number: string | null; fleet_number: string | null }> }>(
+      api<{ data: Array<{ asset_id: number | string; description: string | null; registration_number: string | null; fleet_number: string | null }> }>(
         '/vehicles',
         { query: { pageSize: 500, operatorId: operatorId ?? undefined } },
       ),
@@ -131,7 +131,7 @@ export function ContestacoesPage() {
         method: 'POST',
         body: {
           operatorId: operatorId ?? undefined,
-          assetId: Number(assetId),
+          assetId,
           from: new Date(from).toISOString(),
           to: new Date(to).toISOString(),
         },
@@ -162,7 +162,7 @@ export function ContestacoesPage() {
         },
         body: JSON.stringify({
           operatorId: operatorId ?? undefined,
-          assetId: Number(assetId),
+          assetId,
           from: new Date(from).toISOString(),
           to: new Date(to).toISOString(),
           tripExternalId,

@@ -9,9 +9,10 @@ import { one, query, rows } from '../../db/pool.js';
 import { badRequest } from '../../lib/errors.js';
 import { buildEphemeralClient, getSharedCredentialRow, type CredentialsInput } from './credentials.js';
 import type { Track7Group } from './track7-client.js';
+import { bigId } from '../../lib/big-id.js';
 
 export interface DiscoveredOrganisation {
-  groupId: number;
+  groupId: string;
   name: string;
   /** já vinculada · nova · em conflito com outra operadora */
   status: 'linked' | 'new' | 'conflict';
@@ -55,13 +56,13 @@ export async function discoverOperators(
   }
   if (!groups.length) throw badRequest('Nenhuma organização visível para estas credenciais.');
 
-  const existing = await rows<{ id: string; name: string; track7_organisation_id: number | null }>(
+  const existing = await rows<{ id: string; name: string; track7_organisation_id: number | string | null }>(
     `SELECT id, name, track7_organisation_id FROM operators WHERE organization_id = $1`,
     [organizationId],
   );
 
   const byOrganisation = new Map(
-    existing.filter((o) => o.track7_organisation_id != null).map((o) => [Number(o.track7_organisation_id), o]),
+    existing.filter((o) => o.track7_organisation_id != null).map((o) => [bigId(o.track7_organisation_id)!, o]),
   );
   const byName = new Map(existing.map((o) => [normalize(o.name), o]));
 
@@ -71,7 +72,8 @@ export async function discoverOperators(
   let linked = 0;
 
   for (const group of groups) {
-    const groupId = Number(group.GroupId);
+    const groupId = bigId(group.GroupId);
+    if (!groupId) continue;
     const name = group.Name?.trim() || `Organização ${groupId}`;
 
     const alreadyLinked = byOrganisation.get(groupId);

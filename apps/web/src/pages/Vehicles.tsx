@@ -33,7 +33,7 @@ import {
 } from '../components/ui';
 
 interface Vehicle {
-  asset_id: number;
+  asset_id: number | string;
   description: string | null;
   registration_number: string | null;
   fleet_number: string | null;
@@ -100,7 +100,7 @@ export function VehiclesPage() {
   const [siteId, setSiteId] = useState('');
   const [make, setMake] = useState('');
   const [page, setPage] = useState(1);
-  const [selected, setSelected] = useState<number | null>(null);
+  const [selected, setSelected] = useState<number | string | null>(null);
   const [exporting, setExporting] = useState(false);
 
   // debounce da busca para não disparar uma consulta por tecla digitada
@@ -344,7 +344,7 @@ interface VehicleDetail {
   stats: { viagens_30d: number; km_30d: number; conducao_30d_seg: number; velocidade_maxima_30d: number } | null;
 }
 
-function VehicleDetailModal({ assetId, onClose }: { assetId: number | null; onClose: () => void }) {
+function VehicleDetailModal({ assetId, onClose }: { assetId: number | string | null; onClose: () => void }) {
   const { data, isLoading } = useQuery({
     queryKey: ['vehicle', assetId],
     queryFn: () => api<VehicleDetail>(`/vehicles/${assetId}`),

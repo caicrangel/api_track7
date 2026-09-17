@@ -360,7 +360,7 @@ function IntegrationTab() {
 
   const test = useMutation({
     mutationFn: () =>
-      api<{ ok: boolean; latencyMs: number; message: string; organisations: Array<{ groupId: number; name: string }> }>(
+      api<{ ok: boolean; latencyMs: number; message: string; organisations: Array<{ groupId: number | string; name: string }> }>(
         '/integrations/track7/test',
         { method: 'POST', body: payload() },
       ),
@@ -1032,7 +1032,7 @@ function ChevronDownIcon({ open }: { open: boolean }) {
 }
 
 interface DiscoveredOrganisation {
-  groupId: number;
+  groupId: number | string;
   name: string;
   status: 'linked' | 'new' | 'conflict';
   operatorId: string | null;

@@ -39,7 +39,7 @@ export async function bulkUpsert(
 }
 
 /** Divide um array em blocos de tamanho fixo. */
-export function chunk<T>(items: T[], size: number): T[][] {
+export function chunk<T>(items: ReadonlyArray<T>, size: number): T[][] {
   const out: T[][] = [];
   for (let i = 0; i < items.length; i += size) out.push(items.slice(i, i + size));
   return out;

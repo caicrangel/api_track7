@@ -13,6 +13,7 @@ import type {
   Track7Trip,
 } from './track7-client.js';
 import { splitWindows, timeSpanToSeconds, Track7Client } from './track7-client.js';
+import { bigId, sameId } from '../../lib/big-id.js';
 
 export type SyncKind = 'catalog' | 'incremental' | 'history';
 
@@ -135,7 +136,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         );
       }
 
-      const chosen = configured ? orgs.find((o) => Number(o.GroupId) === Number(configured)) : orgs[0];
+      const chosen = configured ? orgs.find((o) => sameId(o.GroupId, configured)) : orgs[0];
       const resolved = chosen ?? orgs[0];
       if (configured && !chosen) {
         throw badRequest(
@@ -149,7 +150,7 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
         );
       }
       await upsertGroups(organizationId, operatorId, orgs.map((o) => ({ node: o, parentId: null, level: 0 })), true);
-      return Number(resolved.GroupId);
+      return bigId(resolved.GroupId);
     }, false);
 
     if (!organisationId) throw badRequest('Não foi possível determinar a organização na Track7.');
@@ -164,20 +165,23 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
 
     // Grupos a consultar: os configurados ou a organização inteira
     const targetGroups = operator.track7_group_ids?.length
-      ? operator.track7_group_ids.map(Number)
+      ? operator.track7_group_ids.map(bigId).filter((g): g is string => g !== null)
       : [organisationId];
 
     // 3) Veículos
     const assetIds = await track('veiculos', async () => {
-      const seen = new Map<number, Track7Asset>();
+      const seen = new Map<string, Track7Asset>();
       for (const groupId of targetGroups) {
         const assets = await client.getAssets(groupId);
-        for (const asset of assets) seen.set(Number(asset.AssetId), { ...asset, __groupId: groupId });
+        for (const asset of assets) {
+          const id = bigId(asset.AssetId);
+          if (id) seen.set(id, { ...asset, __groupId: groupId });
+        }
       }
       const list = [...seen.values()];
       await upsertVehicles(organizationId, operatorId, list);
       stats.veiculos = list.length;
-      return list.map((a) => Number(a.AssetId));
+      return list.map((a) => bigId(a.AssetId)).filter((a): a is string => a !== null);
     });
 
     // 4) Motoristas
@@ -200,10 +204,11 @@ export async function runSync(options: SyncOptions): Promise<SyncResult> {
       await upsertEventTypes(organizationId, operatorId, library);
       return library;
     });
-    const eventTypeNames = new Map<number, string>();
+    const eventTypeNames = new Map<string, string>();
     for (const item of eventTypes ?? []) {
       if (item.EventTypeId != null && item.Description) {
-        eventTypeNames.set(Number(item.EventTypeId), item.Description);
+        const etId = bigId(item.EventTypeId);
+        if (etId) eventTypeNames.set(etId, item.Description);
       }
     }
 
@@ -259,10 +264,12 @@ async function upsertGroups(
   isOrganisation: boolean,
 ): Promise<number> {
   if (!entries.length) return 0;
-  const values = entries.map(({ node, parentId, level }) => [
+  const values = entries
+    .filter(({ node }) => bigId(node.GroupId) !== null)
+    .map(({ node, parentId, level }) => [
     organizationId,
     operatorId,
-    Number(node.GroupId),
+    bigId(node.GroupId),
     parentId,
     node.Name ?? `Grupo ${node.GroupId}`,
     typeof node.Type === 'number' ? node.Type : null,
@@ -303,10 +310,10 @@ async function upsertVehicles(
   assets: Track7Asset[],
 ): Promise<number> {
   if (!assets.length) return 0;
-  const values = assets.map((a) => [
+  const values = assets.filter((a) => bigId(a.AssetId) !== null).map((a) => [
     organizationId,
     operatorId,
-    Number(a.AssetId),
+    bigId(a.AssetId),
     num(a.SiteId),
     num((a as Record<string, unknown>).__groupId),
     a.Description ?? null,
@@ -409,7 +416,7 @@ async function upsertVehicles(
       `UPDATE vehicles SET status = CASE WHEN asset_id = ANY($2::bigint[]) THEN 'ACTIVE' ELSE 'INACTIVE' END,
               synced_at = now()
         WHERE operator_id = $1`,
-      [operatorId, assets.map((a) => Number(a.AssetId))],
+      [operatorId, assets.map((a) => bigId(a.AssetId)).filter((a) => a !== null)],
     );
     return affected;
   });
@@ -421,10 +428,10 @@ async function upsertDrivers(
   drivers: Track7Driver[],
 ): Promise<number> {
   if (!drivers.length) return 0;
-  const values = drivers.map((d) => [
+  const values = drivers.filter((d) => bigId(d.DriverId) !== null).map((d) => [
     organizationId,
     operatorId,
-    Number(d.DriverId),
+    bigId(d.DriverId),
     num(d.SiteId),
     d.Name ?? null,
     d.EmployeeNumber ?? null,
@@ -477,14 +484,16 @@ export async function upsertPositions(
   positions: Track7Position[],
   updateLast: boolean,
 ): Promise<number> {
-  const valid = positions.filter((p) => parseDate(p.Timestamp));
+  const valid = positions.filter(
+    (p) => parseDate(p.Timestamp) && bigId(p.PositionId) !== null && bigId(p.AssetId) !== null,
+  );
   if (!valid.length) return 0;
 
   const values = valid.map((p) => [
     organizationId,
     operatorId,
-    Number(p.PositionId),
-    Number(p.AssetId),
+    bigId(p.PositionId),
+    bigId(p.AssetId),
     num(p.DriverId),
     parseDate(p.Timestamp),
     num(p.Latitude),
@@ -526,18 +535,18 @@ export async function upsertPositions(
 
     if (updateLast) {
       // mantém apenas a posição mais recente de cada veículo
-      const latest = new Map<number, Track7Position>();
+      const latest = new Map<string, Track7Position>();
       for (const p of valid) {
-        const current = latest.get(Number(p.AssetId));
+        const current = latest.get(bigId(p.AssetId) ?? '');
         if (!current || parseDate(p.Timestamp)! > parseDate(current.Timestamp)!) {
-          latest.set(Number(p.AssetId), p);
+          latest.set(bigId(p.AssetId) ?? '', p);
         }
       }
       const lastValues = [...latest.values()].map((p) => [
         organizationId,
         operatorId,
-        Number(p.AssetId),
-        Number(p.PositionId),
+        bigId(p.AssetId),
+        bigId(p.PositionId),
         num(p.DriverId),
         parseDate(p.Timestamp),
         num(p.Latitude),
@@ -587,7 +596,7 @@ async function syncTrips(
   organizationId: string,
   operatorId: string,
   client: Track7Client,
-  assetIds: number[],
+  assetIds: ReadonlyArray<string>,
   from: Date,
   to: Date,
 ): Promise<number> {
@@ -607,14 +616,16 @@ async function upsertTrips(
   operatorId: string,
   trips: Track7Trip[],
 ): Promise<number> {
-  const valid = trips.filter((t) => parseDate(t.TripStart));
+  const valid = trips.filter(
+    (t) => parseDate(t.TripStart) && bigId(t.TripId) !== null && bigId(t.AssetId) !== null,
+  );
   if (!valid.length) return 0;
 
   const values = valid.map((t) => [
     organizationId,
     operatorId,
-    Number(t.TripId),
-    Number(t.AssetId),
+    bigId(t.TripId),
+    bigId(t.AssetId),
     num(t.DriverId),
     parseDate(t.TripStart),
     parseDate(t.TripEnd),
@@ -681,10 +692,10 @@ async function syncEvents(
   organizationId: string,
   operatorId: string,
   client: Track7Client,
-  assetIds: number[],
+  assetIds: ReadonlyArray<string>,
   from: Date,
   to: Date,
-  eventTypeNames: Map<number, string>,
+  eventTypeNames: Map<string, string>,
 ): Promise<number> {
   let total = 0;
   // a API limita cada consulta a 7 dias
@@ -703,10 +714,10 @@ async function upsertEventTypes(
   library: Track7LibraryEvent[],
 ): Promise<number> {
   if (!library.length) return 0;
-  const values = library.map((item) => [
+  const values = library.filter((item) => bigId(item.EventTypeId) !== null).map((item) => [
     organizationId,
     operatorId,
-    Number(item.EventTypeId),
+    bigId(item.EventTypeId),
     item.Description ?? null,
     item.EventType ?? null,
     item.DisplayUnits ?? null,
@@ -734,21 +745,23 @@ async function upsertEvents(
   organizationId: string,
   operatorId: string,
   events: Track7Event[],
-  eventTypeNames: Map<number, string> = new Map(),
+  eventTypeNames: Map<string, string> = new Map(),
 ): Promise<number> {
-  const valid = events.filter((e) => parseDate(e.StartDateTime));
+  const valid = events.filter(
+    (e) => parseDate(e.StartDateTime) && bigId(e.EventId) !== null && bigId(e.AssetId) !== null,
+  );
   if (!valid.length) return 0;
 
   const values = valid.map((e) => [
     organizationId,
     operatorId,
-    Number(e.EventId),
-    Number(e.AssetId),
+    bigId(e.EventId),
+    bigId(e.AssetId),
     num(e.DriverId),
     num(e.EventTypeId),
     e.EventCategory ?? null,
     // o contrato da API não traz descrição no evento: ela vem da biblioteca de tipos
-    (e.EventTypeId != null ? eventTypeNames.get(Number(e.EventTypeId)) : undefined) ?? null,
+    (e.EventTypeId != null ? eventTypeNames.get(bigId(e.EventTypeId) ?? '') : undefined) ?? null,
     parseDate(e.StartDateTime),
     parseDate(e.EndDateTime),
     num(e.Value),

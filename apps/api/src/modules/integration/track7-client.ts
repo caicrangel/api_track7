@@ -25,6 +25,35 @@
  */
 import { upstream } from '../../lib/errors.js';
 
+
+/**
+ * Os identificadores da Track7 BR passam de 2^53 (a organização do consórcio é
+ * um deles). JSON.parse os converte para double e perde dígitos em silêncio —
+ * 1709358234985169000 chega como 1709358234985168896. O id corrompido é aceito
+ * pelo nosso código e rejeitado pela API, que responde 401 para algo que nunca
+ * existiu. O reviver abaixo lê o texto original de cada número e preserva como
+ * string o que não couber em number; o resto segue number.
+ */
+function parseLossless(text: string): unknown {
+  return JSON.parse(text, function (_key, value, context?: { source?: string }) {
+    if (typeof value === 'number' && typeof context?.source === 'string') {
+      return Number.isSafeInteger(value) ? value : context.source;
+    }
+    return value;
+  });
+}
+
+/**
+ * Serializa uma lista de ids para o corpo JSON preservando os dígitos.
+ * A API espera literais numéricos; enviar "1709..." entre aspas é outro tipo,
+ * e enviar como number perderia precisão nos ids longos. JSON.rawJSON insere o
+ * literal exato na saída do JSON.stringify.
+ */
+function rawIds(ids: ReadonlyArray<number | string>): unknown[] {
+  const raw = (JSON as unknown as { rawJSON(text: string): unknown }).rawJSON;
+  return ids.map((id) => raw(String(id)));
+}
+
 export interface Track7Config {
   identityUrl: string;
   apiUrl: string;
@@ -406,7 +435,7 @@ export class Track7Client {
       if (response.ok) {
         if (response.status === 204) return { data: [] as unknown as T, headers: response.headers };
         const text = await response.text();
-        return { data: (text ? JSON.parse(text) : []) as T, headers: response.headers };
+        return { data: (text ? parseLossless(text) : []) as T, headers: response.headers };
       }
 
       const detail = (await response.text()).slice(0, 500);
@@ -454,38 +483,38 @@ export class Track7Client {
    * `quantity` precisa ser 1 quando há mais de um veículo (regra da API).
    */
   getLatestPositionsByGroups(
-    groupIds: number[],
+    groupIds: ReadonlyArray<number | string>,
     quantity = 1,
     ensureReverseGeocoded = true,
   ): Promise<Track7Position[]> {
     const query = ensureReverseGeocoded ? '?ensureReverseGeocoded=true' : '';
     return this.request<Track7Position[]>(`api/positions/groups/latest/${quantity}${query}`, {
       method: 'POST',
-      body: groupIds,
+      body: rawIds(groupIds),
     });
   }
 
   /** Últimas N posições dos veículos informados. */
-  getLatestPositionsByAssets(assetIds: number[], quantity = 1): Promise<Track7Position[]> {
+  getLatestPositionsByAssets(assetIds: ReadonlyArray<number | string>, quantity = 1): Promise<Track7Position[]> {
     return this.request<Track7Position[]>(`api/positions/assets/latest/${quantity}`, {
       method: 'POST',
-      body: assetIds,
+      body: rawIds(assetIds),
     });
   }
 
   /** Posições de um período (máximo de 7 dias por chamada). */
-  getPositionsByAssets(assetIds: number[], from: Date, to: Date): Promise<Track7Position[]> {
+  getPositionsByAssets(assetIds: ReadonlyArray<number | string>, from: Date, to: Date): Promise<Track7Position[]> {
     return this.request<Track7Position[]>(
       `api/positions/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`,
-      { method: 'POST', body: assetIds },
+      { method: 'POST', body: rawIds(assetIds) },
     );
   }
 
   /** Viagens de um período (máximo de 7 dias por chamada). */
-  getTripsByAssets(assetIds: number[], from: Date, to: Date): Promise<Track7Trip[]> {
+  getTripsByAssets(assetIds: ReadonlyArray<number | string>, from: Date, to: Date): Promise<Track7Trip[]> {
     return this.request<Track7Trip[]>(`api/trips/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`, {
       method: 'POST',
-      body: assetIds,
+      body: rawIds(assetIds),
     });
   }
 
@@ -494,12 +523,12 @@ export class Track7Client {
    * A rota exige um EventFilter no corpo — uma lista de IDs é rejeitada.
    */
   getEventsByAssets(
-    assetIds: number[],
+    assetIds: ReadonlyArray<number | string>,
     from: Date,
     to: Date,
-    eventTypeIds: number[] = [],
+    eventTypeIds: ReadonlyArray<number | string> = [],
   ): Promise<Track7Event[]> {
-    const filter: Track7EventFilter = { EntityIds: assetIds, EventTypeIds: eventTypeIds, MenuId: '' };
+    const filter = { EntityIds: rawIds(assetIds), EventTypeIds: rawIds(eventTypeIds), MenuId: '' };
     return this.request<Track7Event[]>(`api/events/assets/from/${toApiDate(from)}/to/${toApiDate(to)}`, {
       method: 'POST',
       body: filter,
@@ -528,14 +557,14 @@ export class Track7Client {
 
   /** Mesma coisa, restrito a um conjunto de grupos/sites. */
   async getPositionsCreatedSinceForGroups(
-    groupIds: number[],
+    groupIds: ReadonlyArray<number | string>,
     sinceToken: string,
     quantity = 1000,
     entityType: 'Asset' | 'Driver' = 'Asset',
   ): Promise<CreatedSinceResult<Track7Position>> {
     const { data, headers } = await this.requestWithHeaders<Track7Position[]>(
       `api/positions/groups/createdsince/entitytype/${entityType}/sincetoken/${sinceToken}/quantity/${quantity}`,
-      { method: 'POST', body: groupIds },
+      { method: 'POST', body: rawIds(groupIds) },
     );
     return this.toCreatedSinceResult(data, headers);
   }
@@ -558,7 +587,7 @@ export class Track7Client {
   }
 
   /** Teste de conectividade: autentica e lista as organizações visíveis. */
-  async testConnection(): Promise<{ ok: true; organisations: Array<{ groupId: number; name: string; type?: number | string }> }> {
+  async testConnection(): Promise<{ ok: true; organisations: Array<{ groupId: number | string; name: string; type?: number | string }> }> {
     await this.getAccessToken(true);
     const groups = await this.getOrganisationGroups();
     return {

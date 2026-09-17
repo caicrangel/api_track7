@@ -5,6 +5,7 @@ import { badRequest } from '../../lib/errors.js';
 import { Track7Client, TRACK7_REGIONS } from './track7-client.js';
 import { getOperatorById, type OperatorRow } from '../operators/operators-service.js';
 import { getIntegrationMode } from './integration-mode.js';
+import { bigId } from '../../lib/big-id.js';
 
 export interface IntegrationCredentialRow {
   id: string;
@@ -189,12 +190,12 @@ export async function saveCredentials(
       ? (current?.organisation_id ?? null)
       : input.organisationId === null || input.organisationId === ''
         ? null
-        : Number(input.organisationId);
+        : bigId(input.organisationId);
 
   const groupIds =
     input.groupIds === undefined
       ? (current?.group_ids ?? [])
-      : input.groupIds.map((g) => Number(g)).filter((g) => Number.isFinite(g));
+      : input.groupIds.map((g) => bigId(g)).filter((g): g is string => g !== null);
 
   const row = await one<IntegrationCredentialRow>(
     `INSERT INTO integration_credentials

@@ -16,10 +16,11 @@ import {
   toSumobCsv,
   toSumobXlsx,
 } from './sumob-report.js';
+import { zBigId } from '../../lib/big-id.js';
 
 const extractionSchema = z.object({
   operatorId: z.string().uuid().optional(),
-  assetId: z.coerce.number().int(),
+  assetId: zBigId(z),
   from: z.coerce.date(),
   to: z.coerce.date(),
 });
@@ -218,7 +219,7 @@ export async function sumobRoutes(app: FastifyInstance): Promise<void> {
     const q = z
       .object({
         operatorId: z.string().uuid().optional(),
-        assetId: z.coerce.number().int(),
+        assetId: zBigId(z),
         from: z.coerce.date().optional(),
         to: z.coerce.date().optional(),
       })

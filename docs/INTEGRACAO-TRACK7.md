@@ -292,3 +292,28 @@ prováveis para atender exigências específicas:
 - **Diagnóstico** (`GET /api/integrations/track7/diagnostics`) — verifica credenciais,
   obtenção de token, organizações visíveis e volume de dados já sincronizado.
 - **CLI** — `docker compose exec api node dist/cli/sync.js incremental`.
+
+## Identificadores acima de 2^53
+
+Os ids da Track7 BR são derivados de timestamp em nanossegundos e passam do
+inteiro seguro do JavaScript: a organização do consórcio é `1709358234985169000`,
+com 19 dígitos. `JSON.parse` converte para double e perde dígitos em silêncio —
+`1709358234985168961` chega como `1709358234985169000`. Nada falha no nosso lado;
+a Track7 é que devolve 401 para um id que nunca existiu, e o relatório de
+contestação extrairia as posições de outro veículo sem sinalizar nada.
+
+O caminho do id preserva os dígitos em todas as pontas:
+
+| Ponto | Mecanismo |
+|-------|-----------|
+| resposta da API | `parseLossless` lê o texto original de cada número e mantém como string o que não couber em `number` |
+| corpo JSON enviado | `rawIds` emite o literal exato via `JSON.rawJSON` — string entre aspas seria outro tipo para a API |
+| parâmetro de consulta | `bigId` normaliza para string decimal; o Postgres aceita string em coluna `bigint` |
+| leitura do banco | parser de `int8` devolve `number` até 2^53 e string exata acima |
+| entrada HTTP | `zBigId` no lugar de `z.coerce.number()`, que truncaria |
+
+Comparação entre ids de origens diferentes usa `sameId`, nunca `===` direto:
+um lado pode ser `number` e o outro `string`.
+
+Valores que não são identificadores — contadores, horímetro, odômetro — seguem
+`number`. A troca vale só onde a precisão é a identidade do registro.

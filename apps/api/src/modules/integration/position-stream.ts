@@ -22,6 +22,7 @@ import { acquireLock } from '../../lib/cache.js';
 import { buildClient } from './credentials.js';
 import { upsertPositions } from './sync-service.js';
 import { SINCE_TOKEN_MAX_AGE_MS, toSinceToken } from './track7-client.js';
+import { bigId } from '../../lib/big-id.js';
 
 /** Teto de páginas por ciclo — evita que um backlog grande prenda o coletor. */
 const MAX_PAGES_PER_CYCLE = 50;
@@ -221,11 +222,11 @@ export async function backfillPositions(
 ): Promise<{ collected: number; windows: number }> {
   const { client } = await buildClient(operatorId);
   const { rows } = await import('../../db/pool.js');
-  const assets = await rows<{ asset_id: number }>(
+  const assets = await rows<{ asset_id: number | string }>(
     `SELECT asset_id FROM vehicles WHERE operator_id = $1 AND status = 'ACTIVE'`,
     [operatorId],
   );
-  const assetIds = assets.map((a) => Number(a.asset_id));
+  const assetIds = assets.map((a) => bigId(a.asset_id)).filter((a): a is string => a !== null);
   if (!assetIds.length) return { collected: 0, windows: 0 };
 
   const { splitWindows } = await import('./track7-client.js');

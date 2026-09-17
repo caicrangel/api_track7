@@ -3,9 +3,32 @@ import { env } from '../env.js';
 
 const { Pool, types } = pg;
 
-// numeric (OID 1700) e int8 (20) chegam como string por padrão; converte para number
+// numeric (OID 1700) chega como string por padrão; converte para number
 types.setTypeParser(1700, (v) => (v === null ? null : Number(v)));
-types.setTypeParser(20, (v) => (v === null ? null : Number(v)));
+
+// int8 (OID 20) guarda os identificadores da Track7, que passam de 2^53 — a
+// organização do consórcio é um deles. Convertidos para number perdem dígitos
+// em silêncio: 1709358234985169000 vira 1709358234985168896, e a API devolve
+// 401 para um id que nunca existiu. Acima do limite seguro devolvemos a string
+// exata; abaixo segue number, que é o que contadores e horímetro esperam.
+const int8 = (v: string | null) => {
+  if (v === null) return null;
+  const n = Number(v);
+  return Number.isSafeInteger(n) ? n : v;
+};
+types.setTypeParser(20, int8);
+// 1016 = bigint[]; o tipo exportado pelo pg não lista os OIDs de array.
+(types.setTypeParser as unknown as (oid: number, fn: (v: string) => unknown) => void)(
+  1016,
+  (v) => (v === null ? null : parseBigIntArray(v)),
+);
+
+function parseBigIntArray(raw: string): Array<number | string | null> {
+  const inner = raw.replace(/^\{|\}$/g, '');
+  if (!inner) return [];
+  // elemento nulo sai do Postgres como NULL sem aspas
+  return inner.split(',').map((item) => (item === 'NULL' ? null : int8(item)));
+}
 
 export const pool = new Pool({
   connectionString: env.DATABASE_URL,

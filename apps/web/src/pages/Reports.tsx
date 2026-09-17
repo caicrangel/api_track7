@@ -353,7 +353,7 @@ function ParamField({
 }) {
   const vehicles = useQuery({
     queryKey: ['vehicles-options'],
-    queryFn: () => api<{ data: Array<{ asset_id: number; description: string | null; registration_number: string | null }> }>(
+    queryFn: () => api<{ data: Array<{ asset_id: number | string; description: string | null; registration_number: string | null }> }>(
       '/vehicles',
       { query: { pageSize: 500 } },
     ),

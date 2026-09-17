@@ -23,6 +23,7 @@ import {
 import { backfillPositions, collectPositions, getCursor, seedCursor } from './position-stream.js';
 import { TRACK7_REGIONS } from './track7-client.js';
 import { resolveOperator } from '../operators/operators-service.js';
+import { bigId } from '../../lib/big-id.js';
 
 /** Toda rota de integração age sobre uma empresa operadora específica. */
 const operatorQuerySchema = z.object({ operatorId: z.string().uuid().optional() });
@@ -211,7 +212,7 @@ export async function integrationRoutes(app: FastifyInstance): Promise<void> {
     if (live) {
       const { client } = await buildClient(operator.id);
       const orgs = await client.getOrganisationGroups();
-      const rootId = operator.track7_organisation_id ?? Number(orgs[0]?.GroupId);
+      const rootId = operator.track7_organisation_id ?? bigId(orgs[0]?.GroupId);
       const tree = rootId ? await client.getSubGroups(rootId) : null;
       return { organisations: orgs, tree };
     }

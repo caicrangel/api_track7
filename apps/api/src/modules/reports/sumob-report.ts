@@ -83,7 +83,7 @@ export interface SumobRow {
 
 export interface SumobExtraction {
   rows: SumobRow[];
-  assetId: number;
+  assetId: string;
   vehicleOrder: string;
   timezone: string;
   from: Date;
@@ -101,7 +101,7 @@ const ORDER_FIELDS = new Set(['fleet_number', 'description', 'registration_numbe
  */
 export async function extractSumobRows(options: {
   operatorId: string;
-  assetId: number;
+  assetId: string;
   from: Date;
   to: Date;
   timezone: string;
