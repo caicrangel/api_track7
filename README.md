@@ -89,6 +89,45 @@ configuração a cada minuto — mudanças na UI entram em vigor sem reiniciar n
 
 ---
 
+## 2.1 Quando a API não sobe
+
+O container `fleetgov-api` fica `unhealthy` e o log mostra:
+
+```
+password authentication failed for user "fleetgov"   (código 28P01)
+```
+
+A senha do banco vive em **duas** variáveis do `.env` — `POSTGRES_PASSWORD`, que o
+Postgres usa, e a que está embutida em `DATABASE_URL`, que a API usa. O container do
+Postgres continua `Healthy` porque `pg_isready` não testa senha; quem descobre a
+divergência é a API.
+
+**1. As duas variáveis batem?**
+
+```bash
+grep -E '^POSTGRES_PASSWORD=|^DATABASE_URL=' .env
+```
+
+Se divergirem, `./scripts/gen-secrets.sh` ressincroniza e basta reiniciar.
+
+**2. Se já batem, o volume é anterior à senha atual.** O Postgres só aplica
+`POSTGRES_PASSWORD` na criação do volume — trocar a senha no `.env` depois disso não
+tem efeito, o banco mantém a antiga. Recrie o volume:
+
+```bash
+docker compose down -v      # -v apaga o volume; só faça isso se não houver dado a preservar
+docker compose up -d --build
+```
+
+Para trocar a senha **preservando** os dados, altere no banco em vez de recriar:
+
+```bash
+docker compose exec postgres psql -U fleetgov -d fleetgov \
+  -c "ALTER USER fleetgov WITH PASSWORD 'nova-senha';"
+```
+
+e ajuste `POSTGRES_PASSWORD` e `DATABASE_URL` no `.env` para a mesma senha.
+
 ## 3. Módulos
 
 ### Veículos
