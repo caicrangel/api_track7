@@ -110,6 +110,11 @@ grep -E '^POSTGRES_PASSWORD=|^DATABASE_URL=' .env
 
 Se divergirem, `./scripts/gen-secrets.sh` ressincroniza e basta reiniciar.
 
+Note que a senha vai **percent-encodada** dentro da URL. Uma senha em base64 traz
+`/`, `+` e `=`, que numa URL significam outra coisa — o `/` encerra o userinfo e o
+resto vira caminho. Colada crua, o driver rejeita com `Invalid URL` antes mesmo de
+tentar conectar. O `gen-secrets.sh` cuida disso; editando à mão, encode.
+
 **2. Se já batem, o volume é anterior à senha atual.** O Postgres só aplica
 `POSTGRES_PASSWORD` na criação do volume — trocar a senha no `.env` depois disso não
 tem efeito, o banco mantém a antiga. Recrie o volume:

@@ -42,7 +42,11 @@ PW="$(grep '^POSTGRES_PASSWORD=' "$ENV_FILE" | cut -d= -f2-)"
 USER_NAME="$(grep '^POSTGRES_USER=' "$ENV_FILE" | cut -d= -f2-)"
 DB_NAME="$(grep '^POSTGRES_DB=' "$ENV_FILE" | cut -d= -f2-)"
 CURRENT_URL="$(grep '^DATABASE_URL=' "$ENV_FILE" | cut -d= -f2-)"
-EXPECTED_URL="postgres://${USER_NAME}:${PW}@postgres:5432/${DB_NAME}"
+
+# Uma senha base64 traz "/", "+" e "=", que numa URL significam outra coisa —
+# o "/" encerra o userinfo e o resto vira caminho. Precisa ir percent-encodada.
+PW_ENC="$(python3 -c 'import sys,urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$PW")"
+EXPECTED_URL="postgres://${USER_NAME}:${PW_ENC}@postgres:5432/${DB_NAME}"
 
 case "$CURRENT_URL" in
   *@postgres:5432/*)
